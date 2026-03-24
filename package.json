@@ -1,0 +1,57 @@
+{
+  "name": "wechat-agent-desktop",
+  "version": "0.1.0",
+  "description": "A lightweight desktop app that connects WeChat OpenClaw/iLink messages to a simple AI assistant.",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && electron dist/main/main.js",
+    "dev": "npm run start",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip",
+    "dist:win": "npm run build && electron-builder --win nsis portable"
+  },
+  "build": {
+    "appId": "com.pinixai.wechat-agent-desktop",
+    "productName": "WeChat Agent Desktop",
+    "asar": true,
+    "afterPack": "./scripts/after-pack.mjs",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "artifactName": "wechat-agent-desktop-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.2",
+    "qrcode": "^1.5.4",
+    "typescript": "^5.8.2"
+  }
+}
