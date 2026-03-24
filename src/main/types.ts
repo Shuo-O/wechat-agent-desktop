@@ -1,5 +1,21 @@
 export type LogLevel = "info" | "warn" | "error";
-export type ProviderKind = "mock" | "deepseek" | "openai" | "codex";
+export type ProviderKind =
+  | "mock"
+  | "deepseek"
+  | "qwen"
+  | "zhipu"
+  | "doubao"
+  | "kimi"
+  | "siliconflow"
+  | "openai"
+  | "anthropic"
+  | "gemini"
+  | "xai"
+  | "openrouter"
+  | "custom"
+  | "codex";
+export type CloudProviderKind = Exclude<ProviderKind, "mock" | "codex">;
+export type ChannelBackendKind = "openclaw-official" | "openclaw-compatible";
 export type AssistantPresetId = "general" | "writer" | "work" | "support";
 export type WechatLoginStatus =
   | "logged_out"
@@ -8,6 +24,8 @@ export type WechatLoginStatus =
   | "expired"
   | "error";
 export type CodexSandboxMode = "read-only" | "workspace-write";
+export type ProviderApiStyle = "openai" | "anthropic" | "gemini";
+export type ProviderOptionGroup = "builtin" | "domestic" | "global" | "advanced";
 
 export interface WechatCredentials {
   token: string;
@@ -20,19 +38,25 @@ export interface WechatCredentials {
 export interface ProviderSettings {
   kind: ProviderKind;
   assistantPreset: AssistantPresetId;
-  deepseekApiKey: string;
-  deepseekModel: string;
-  openaiBaseUrl: string;
-  openaiApiKey: string;
-  openaiModel: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  apiStyle: ProviderApiStyle;
   codexWorkdir: string;
   codexModel: string;
   codexSandbox: CodexSandboxMode;
 }
 
+export interface ChannelBackendSettings {
+  kind: ChannelBackendKind;
+  baseUrl: string;
+  requestHeaders: Record<string, string>;
+}
+
 export interface AppSettings {
   allowUnknownContacts: boolean;
   advancedModeEnabled: boolean;
+  channel: ChannelBackendSettings;
   provider: ProviderSettings;
 }
 
@@ -90,17 +114,21 @@ export interface Snapshot {
   settings: {
     allowUnknownContacts: boolean;
     advancedModeEnabled: boolean;
+    channelBackendKind: ChannelBackendKind;
+    channelBaseUrl: string;
+    channelHeadersJson: string;
     providerKind: ProviderKind;
     assistantPreset: AssistantPresetId;
-    deepseekModel: string;
-    deepseekApiKeyMasked: string;
-    openaiBaseUrl: string;
-    openaiModel: string;
-    openaiApiKeyMasked: string;
+    providerBaseUrl: string;
+    providerModel: string;
+    providerApiStyle: ProviderApiStyle;
+    providerApiKeyMasked: string;
     codexWorkdir: string;
     codexModel: string;
     codexSandbox: CodexSandboxMode;
   };
+  channelOptions: ChannelBackendOptionSnapshot[];
+  providerOptions: ProviderOptionSnapshot[];
   runtime: RuntimeState;
   wechat: {
     status: WechatLoginStatus;
@@ -123,17 +151,37 @@ export interface Snapshot {
   logs: LogEntry[];
 }
 
+export interface ProviderOptionSnapshot {
+  kind: ProviderKind;
+  label: string;
+  group: ProviderOptionGroup;
+  description: string;
+  apiStyle: ProviderApiStyle | null;
+  defaultBaseUrl: string;
+  defaultModel: string;
+  modelPlaceholder: string;
+}
+
+export interface ChannelBackendOptionSnapshot {
+  kind: ChannelBackendKind;
+  label: string;
+  description: string;
+  defaultBaseUrl: string;
+}
+
 export interface SaveSettingsInput {
   allowUnknownContacts: boolean;
   advancedModeEnabled: boolean;
+  channelBackendKind: ChannelBackendKind;
+  channelBaseUrl: string;
+  channelHeadersJson: string;
   providerKind: ProviderKind;
   previousProviderKind?: ProviderKind;
   assistantPreset: AssistantPresetId;
-  deepseekModel: string;
-  deepseekApiKey?: string;
-  openaiBaseUrl: string;
-  openaiModel: string;
-  openaiApiKey?: string;
+  providerBaseUrl: string;
+  providerModel: string;
+  providerApiStyle: ProviderApiStyle;
+  providerApiKey?: string;
   codexWorkdir: string;
   codexModel: string;
   codexSandbox: CodexSandboxMode;

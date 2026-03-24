@@ -2,27 +2,53 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
+import {
+  getChannelBackendDefinition,
+  isChannelBackendKind
+} from "./channel-backend-catalog";
+import {
+  getProviderDefinition,
+  isProviderKind,
+  resolveProviderApiStyle
+} from "./provider-catalog";
 import type {
   AppData,
   AppSettings,
+  AssistantPresetId,
+  ChannelBackendKind,
+  ChannelBackendSettings,
+  CodexSandboxMode,
   ContactEntry,
   LogEntry,
   LogLevel,
+  ProviderApiStyle,
+  ProviderKind,
   ProviderSettings
 } from "./types";
 
 const MAX_LOGS = 200;
 const MAX_HISTORY = 16;
 
-function defaultProviderSettings(): ProviderSettings {
+function defaultChannelSettings(): ChannelBackendSettings {
+  const backend = getChannelBackendDefinition("openclaw-official");
+
   return {
-    kind: "deepseek",
+    kind: backend.kind,
+    baseUrl: backend.defaultBaseUrl,
+    requestHeaders: {}
+  };
+}
+
+function defaultProviderSettings(): ProviderSettings {
+  const deepseek = getProviderDefinition("deepseek");
+
+  return {
+    kind: deepseek.kind,
     assistantPreset: "general",
-    deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? "",
-    deepseekModel: "deepseek-chat",
-    openaiBaseUrl: "https://api.openai.com/v1",
-    openaiApiKey: "",
-    openaiModel: "gpt-4o-mini",
+    apiKey: process.env.DEEPSEEK_API_KEY ?? "",
+    baseUrl: deepseek.defaultBaseUrl,
+    model: deepseek.defaultModel,
+    apiStyle: resolveProviderApiStyle(deepseek.kind),
     codexWorkdir: "",
     codexModel: "",
     codexSandbox: "read-only"
@@ -33,6 +59,7 @@ function defaultSettings(): AppSettings {
   return {
     allowUnknownContacts: true,
     advancedModeEnabled: false,
+    channel: defaultChannelSettings(),
     provider: defaultProviderSettings()
   };
 }
@@ -134,10 +161,8 @@ export class JsonStore {
         settings: {
           ...defaultSettings(),
           ...(parsed.settings ?? {}),
-          provider: {
-            ...defaultProviderSettings(),
-            ...(parsed.settings?.provider ?? {})
-          }
+          channel: normalizeChannelSettings(parsed.settings?.channel, parsed.wechat?.credentials?.baseUrl),
+          provider: normalizeProviderSettings(parsed.settings?.provider)
         },
         wechat: {
           ...createEmptyData().wechat,
@@ -170,4 +195,164 @@ export class JsonStore {
   private persist(): void {
     fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf8");
   }
+}
+
+function normalizeChannelSettings(
+  raw: unknown,
+  fallbackCredentialBaseUrl?: string
+): ChannelBackendSettings {
+  const defaults = defaultChannelSettings();
+  const candidate = (raw ?? {}) as Partial<ChannelBackendSettings> & Record<string, unknown>;
+  const kind = readChannelBackendKind(candidate.kind, fallbackCredentialBaseUrl);
+  const definition = getChannelBackendDefinition(kind);
+
+  return {
+    kind,
+    baseUrl: readChannelBaseUrl(candidate.baseUrl, definition.defaultBaseUrl, fallbackCredentialBaseUrl),
+    requestHeaders: readRequestHeaders(candidate.requestHeaders)
+  };
+}
+
+function normalizeProviderSettings(raw: unknown): ProviderSettings {
+  const defaults = defaultProviderSettings();
+  const candidate = (raw ?? {}) as Partial<ProviderSettings> & Record<string, unknown>;
+  const kind = readProviderKind(candidate.kind);
+  const definition = getProviderDefinition(kind);
+
+  return {
+    ...defaults,
+    kind,
+    assistantPreset: readAssistantPreset(candidate.assistantPreset),
+    apiKey: readApiKey(kind, candidate),
+    baseUrl: readBaseUrl(kind, definition.defaultBaseUrl, candidate),
+    model: readModel(kind, definition.defaultModel, candidate),
+    apiStyle: readApiStyle(kind, candidate.apiStyle),
+    codexWorkdir: readString(candidate.codexWorkdir),
+    codexModel: readString(candidate.codexModel),
+    codexSandbox: readCodexSandbox(candidate.codexSandbox)
+  };
+}
+
+function readChannelBackendKind(
+  value: unknown,
+  fallbackCredentialBaseUrl?: string
+): ChannelBackendKind {
+  if (isChannelBackendKind(value)) {
+    return value;
+  }
+
+  if (
+    typeof fallbackCredentialBaseUrl === "string"
+    && fallbackCredentialBaseUrl.trim()
+    && fallbackCredentialBaseUrl.trim() !== defaultChannelSettings().baseUrl
+  ) {
+    return "openclaw-compatible";
+  }
+
+  return defaultChannelSettings().kind;
+}
+
+function readChannelBaseUrl(
+  value: unknown,
+  fallback: string,
+  fallbackCredentialBaseUrl?: string
+): string {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+  if (typeof fallbackCredentialBaseUrl === "string" && fallbackCredentialBaseUrl.trim()) {
+    return fallbackCredentialBaseUrl;
+  }
+  return fallback;
+}
+
+function readProviderKind(value: unknown): ProviderKind {
+  if (isProviderKind(value)) {
+    return value;
+  }
+  return defaultProviderSettings().kind;
+}
+
+function readAssistantPreset(value: unknown): AssistantPresetId {
+  if (value === "general" || value === "writer" || value === "work" || value === "support") {
+    return value;
+  }
+  return defaultProviderSettings().assistantPreset;
+}
+
+function readApiKey(
+  kind: ProviderKind,
+  candidate: Partial<ProviderSettings> & Record<string, unknown>
+): string {
+  if (typeof candidate.apiKey === "string") {
+    return candidate.apiKey;
+  }
+  if (kind === "deepseek" && typeof candidate.deepseekApiKey === "string") {
+    return candidate.deepseekApiKey;
+  }
+  if (kind === "openai" && typeof candidate.openaiApiKey === "string") {
+    return candidate.openaiApiKey;
+  }
+  return kind === "deepseek" ? process.env.DEEPSEEK_API_KEY ?? "" : "";
+}
+
+function readBaseUrl(
+  kind: ProviderKind,
+  fallback: string,
+  candidate: Partial<ProviderSettings> & Record<string, unknown>
+): string {
+  if (typeof candidate.baseUrl === "string") {
+    return candidate.baseUrl;
+  }
+  if (kind === "openai" && typeof candidate.openaiBaseUrl === "string") {
+    return candidate.openaiBaseUrl;
+  }
+  return fallback;
+}
+
+function readModel(
+  kind: ProviderKind,
+  fallback: string,
+  candidate: Partial<ProviderSettings> & Record<string, unknown>
+): string {
+  if (typeof candidate.model === "string") {
+    return candidate.model;
+  }
+  if (kind === "deepseek" && typeof candidate.deepseekModel === "string") {
+    return candidate.deepseekModel;
+  }
+  if (kind === "openai" && typeof candidate.openaiModel === "string") {
+    return candidate.openaiModel;
+  }
+  return fallback;
+}
+
+function readApiStyle(kind: ProviderKind, value: unknown): ProviderApiStyle {
+  if (value === "openai" || value === "anthropic" || value === "gemini") {
+    return resolveProviderApiStyle(kind, value);
+  }
+  return resolveProviderApiStyle(kind);
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function readRequestHeaders(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, headerValue]) => {
+      if (!key.trim() || typeof headerValue !== "string") {
+        return [];
+      }
+      return [[key, headerValue]];
+    })
+  );
+}
+
+function readCodexSandbox(value: unknown): CodexSandboxMode {
+  return value === "workspace-write" ? "workspace-write" : "read-only";
 }

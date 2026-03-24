@@ -1,6 +1,7 @@
 const state = {
   snapshot: null,
-  error: ""
+  error: "",
+  formDraft: null
 };
 
 async function call(action, ...args) {
@@ -61,56 +62,168 @@ function contactStatusPill(status) {
   return `<span class="status-pill ok">正常</span>`;
 }
 
+function getChannelOption(snapshot, kind) {
+  return snapshot.channelOptions.find((item) => item.kind === kind) || null;
+}
+
+function getProviderOption(snapshot, kind) {
+  return snapshot.providerOptions.find((item) => item.kind === kind) || null;
+}
+
+function isCloudProvider(snapshot, kind) {
+  return Boolean(getProviderOption(snapshot, kind)?.apiStyle);
+}
+
 function providerVendorLabel(snapshot) {
-  if (snapshot.settings.providerKind === "deepseek") return "DeepSeek";
-  if (snapshot.settings.providerKind === "codex") return "Codex CLI";
-  if (snapshot.settings.providerKind === "mock") return "内置演示";
-  try {
-    return new URL(snapshot.settings.openaiBaseUrl).host || "OpenAI 兼容";
-  } catch {
-    return snapshot.settings.openaiBaseUrl || "OpenAI 兼容";
-  }
+  return getProviderOption(snapshot, snapshot.settings.providerKind)?.label || "未知供应商";
+}
+
+function channelBackendLabel(snapshot) {
+  return getChannelOption(snapshot, snapshot.settings.channelBackendKind)?.label || "未知后端";
 }
 
 function providerModelLabel(snapshot) {
-  if (snapshot.settings.providerKind === "deepseek") {
-    return snapshot.settings.deepseekModel || "deepseek-chat";
-  }
-  if (snapshot.settings.providerKind === "openai") {
-    return snapshot.settings.openaiModel || "gpt-4o-mini";
+  if (snapshot.settings.providerKind === "mock") {
+    return "内置回复";
   }
   if (snapshot.settings.providerKind === "codex") {
     return snapshot.settings.codexModel || "CLI 默认";
   }
-  return "内置回复";
+  return snapshot.settings.providerModel || "待填写";
 }
 
-function inputValue(id, fallback = "") {
-  const element = document.getElementById(id);
-  return element ? element.value : fallback;
+function providerApiStyleLabel(style) {
+  if (style === "anthropic") return "Anthropic Messages";
+  if (style === "gemini") return "Gemini GenerateContent";
+  return "OpenAI Chat Completions";
 }
 
-function checkboxValue(id, fallback = false) {
-  const element = document.getElementById(id);
-  return element ? element.checked : fallback;
+function buildDraftFromSnapshot(snapshot) {
+  return {
+    advancedModeEnabled: snapshot.settings.advancedModeEnabled,
+    channelBackendKind: snapshot.settings.channelBackendKind,
+    channelBaseUrl: snapshot.settings.channelBaseUrl,
+    channelHeadersJson: snapshot.settings.channelHeadersJson,
+    providerKind: snapshot.settings.providerKind,
+    assistantPreset: snapshot.settings.assistantPreset,
+    providerBaseUrl: snapshot.settings.providerBaseUrl,
+    providerModel: snapshot.settings.providerModel,
+    providerApiStyle: snapshot.settings.providerApiStyle,
+    providerApiKey: "",
+    codexWorkdir: snapshot.settings.codexWorkdir,
+    codexModel: snapshot.settings.codexModel,
+    codexSandbox: snapshot.settings.codexSandbox,
+    allowUnknownContacts: snapshot.settings.allowUnknownContacts,
+    resetHistories: false
+  };
 }
 
 function currentSettingsDraft(snapshot) {
-  return {
-    advancedModeEnabled: checkboxValue("advancedModeEnabled", snapshot.settings.advancedModeEnabled),
-    providerKind: inputValue("providerKind", snapshot.settings.providerKind),
-    assistantPreset: inputValue("assistantPreset", snapshot.settings.assistantPreset),
-    deepseekModel: inputValue("deepseekModel", snapshot.settings.deepseekModel),
-    deepseekApiKey: inputValue("deepseekApiKey", ""),
-    openaiBaseUrl: inputValue("openaiBaseUrl", snapshot.settings.openaiBaseUrl),
-    openaiModel: inputValue("openaiModel", snapshot.settings.openaiModel),
-    openaiApiKey: inputValue("openaiApiKey", ""),
-    codexWorkdir: inputValue("codexWorkdir", snapshot.settings.codexWorkdir),
-    codexModel: inputValue("codexModel", snapshot.settings.codexModel),
-    codexSandbox: inputValue("codexSandbox", snapshot.settings.codexSandbox),
-    allowUnknownContacts: checkboxValue("allowUnknownContacts", snapshot.settings.allowUnknownContacts),
-    resetHistories: checkboxValue("resetHistories", false)
+  if (!state.formDraft) {
+    state.formDraft = buildDraftFromSnapshot(snapshot);
+  }
+  return state.formDraft;
+}
+
+function syncDraftFromForm() {
+  const snapshot = state.snapshot;
+  const form = document.getElementById("settings-form");
+  if (!snapshot) {
+    return state.formDraft;
+  }
+  if (!form) {
+    return currentSettingsDraft(snapshot);
+  }
+
+  const formData = new FormData(form);
+  state.formDraft = {
+    advancedModeEnabled: document.getElementById("advancedModeEnabled")?.checked
+      ?? snapshot.settings.advancedModeEnabled,
+    channelBackendKind: formData.get("channelBackendKind") || snapshot.settings.channelBackendKind,
+    channelBaseUrl: formData.get("channelBaseUrl") || "",
+    channelHeadersJson: formData.get("channelHeadersJson") || "",
+    providerKind: formData.get("providerKind") || snapshot.settings.providerKind,
+    assistantPreset: formData.get("assistantPreset") || snapshot.settings.assistantPreset,
+    providerBaseUrl: formData.get("providerBaseUrl") || "",
+    providerModel: formData.get("providerModel") || "",
+    providerApiStyle: formData.get("providerApiStyle") || snapshot.settings.providerApiStyle,
+    providerApiKey: formData.get("providerApiKey") || "",
+    codexWorkdir: formData.get("codexWorkdir") || "",
+    codexModel: formData.get("codexModel") || "",
+    codexSandbox: formData.get("codexSandbox") || snapshot.settings.codexSandbox,
+    allowUnknownContacts: document.getElementById("allowUnknownContacts")?.checked
+      ?? snapshot.settings.allowUnknownContacts,
+    resetHistories: document.getElementById("resetHistories")?.checked || false
   };
+
+  return state.formDraft;
+}
+
+function applyChannelDefaults(kind) {
+  const snapshot = state.snapshot;
+  if (!snapshot) return;
+
+  const option = getChannelOption(snapshot, kind);
+  if (!option) return;
+
+  const draft = currentSettingsDraft(snapshot);
+  draft.channelBackendKind = kind;
+  draft.channelBaseUrl = option.defaultBaseUrl || "";
+  if (!draft.channelHeadersJson.trim()) {
+    draft.channelHeadersJson = "{}";
+  }
+}
+
+function applyProviderDefaults(kind) {
+  const snapshot = state.snapshot;
+  if (!snapshot) return;
+
+  const option = getProviderOption(snapshot, kind);
+  if (!option) return;
+
+  const draft = currentSettingsDraft(snapshot);
+  draft.providerKind = kind;
+  draft.providerBaseUrl = option.defaultBaseUrl || "";
+  draft.providerModel = option.defaultModel || "";
+  draft.providerApiStyle = option.apiStyle || draft.providerApiStyle || "openai";
+}
+
+function renderChannelOptions(snapshot, selectedKind) {
+  return snapshot.channelOptions
+    .map(
+      (item) =>
+        `<option value="${item.kind}" ${selectedKind === item.kind ? "selected" : ""}>${escapeHtml(item.label)}</option>`
+    )
+    .join("");
+}
+
+function renderProviderOptions(snapshot, selectedKind, showCodexOption) {
+  const visibleOptions = snapshot.providerOptions.filter(
+    (item) => item.kind !== "codex" || showCodexOption
+  );
+  const groupLabels = {
+    builtin: "内置",
+    domestic: "国内热门",
+    global: "国际热门",
+    advanced: "高级"
+  };
+
+  return ["builtin", "domestic", "global", "advanced"]
+    .map((group) => {
+      const options = visibleOptions.filter((item) => item.group === group);
+      if (!options.length) return "";
+      return `
+        <optgroup label="${groupLabels[group]}">
+          ${options
+            .map(
+              (item) =>
+                `<option value="${item.kind}" ${selectedKind === item.kind ? "selected" : ""}>${escapeHtml(item.label)}</option>`
+            )
+            .join("")}
+        </optgroup>
+      `;
+    })
+    .join("");
 }
 
 function render() {
@@ -172,12 +285,15 @@ function render() {
     : `<div class="empty">还没有运行日志。</div>`;
 
   const settingsDraft = currentSettingsDraft(snapshot);
+  const activeChannelOption = getChannelOption(snapshot, settingsDraft.channelBackendKind);
   const activeProviderKind = settingsDraft.providerKind;
-  const showDeepSeekFields = activeProviderKind === "deepseek";
-  const showOpenAiFields = activeProviderKind === "openai";
+  const activeProviderOption = getProviderOption(snapshot, activeProviderKind);
+  const showCloudFields = isCloudProvider(snapshot, activeProviderKind);
   const showCodexFields = activeProviderKind === "codex";
   const showCodexOption =
-    settingsDraft.advancedModeEnabled || activeProviderKind === "codex" || snapshot.settings.providerKind === "codex";
+    settingsDraft.advancedModeEnabled
+    || activeProviderKind === "codex"
+    || snapshot.settings.providerKind === "codex";
 
   root.innerHTML = `
     <div class="shell">
@@ -198,6 +314,10 @@ function render() {
           <div class="stat-card">
             <div class="stat-label">当前供应商</div>
             <div class="stat-value">${escapeHtml(providerVendorLabel(snapshot))}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">微信后端</div>
+            <div class="stat-value">${escapeHtml(channelBackendLabel(snapshot))}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">当前模型</div>
@@ -243,7 +363,7 @@ function render() {
                     <button class="btn btn-secondary" data-action="logout" ${snapshot.wechat.accountId ? "" : "disabled"}>退出登录</button>
                     <button class="btn btn-muted" data-action="open-data">打开数据目录</button>
                   </div>
-                  <p class="meta-note">账号：${escapeHtml(snapshot.wechat.accountId || "暂无")}<br />用户：${escapeHtml(snapshot.wechat.userId || "暂无")}<br />运行：${snapshot.runtime.isRunning ? "正在接收消息" : snapshot.wechat.status === "logged_in" ? "已暂停接收，可手动恢复" : "登录后自动开始"}</p>
+                  <p class="meta-note">后端：${escapeHtml(channelBackendLabel(snapshot))}<br />接口：${escapeHtml(snapshot.settings.channelBaseUrl || "暂无")}<br />账号：${escapeHtml(snapshot.wechat.accountId || "暂无")}<br />用户：${escapeHtml(snapshot.wechat.userId || "暂无")}<br />运行：${snapshot.runtime.isRunning ? "正在接收消息" : snapshot.wechat.status === "logged_in" ? "已暂停接收，可手动恢复" : "登录后自动开始"}</p>
                   ${
                     snapshot.wechat.lastError
                       ? `<p class="subtle"><strong>最近异常：</strong>${escapeHtml(snapshot.wechat.lastError)}</p>`
@@ -266,17 +386,45 @@ function render() {
             <section class="card">
               <div class="card-head">
                 <div>
-                  <h3>助手设置</h3>
+                  <h3>系统设置</h3>
+                  ${
+                    activeChannelOption
+                      ? `<p>${escapeHtml(activeChannelOption.description)}</p>`
+                      : ""
+                  }
                 </div>
               </div>
               <form id="settings-form">
                 <div class="field">
+                  <label for="channelBackendKind">微信后端</label>
+                  <select id="channelBackendKind" name="channelBackendKind">
+                    ${renderChannelOptions(snapshot, settingsDraft.channelBackendKind)}
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="channelBaseUrl">后端 Base URL</label>
+                  <input id="channelBaseUrl" name="channelBaseUrl" value="${escapeHtml(settingsDraft.channelBaseUrl)}" placeholder="${escapeHtml(activeChannelOption?.defaultBaseUrl || "https://example.com")}" />
+                </div>
+                <div class="field">
+                  <label for="channelHeadersJson">附加请求头 JSON</label>
+                  <textarea id="channelHeadersJson" name="channelHeadersJson" placeholder="{&#10;  &quot;X-Env&quot;: &quot;staging&quot;&#10;}">${escapeHtml(settingsDraft.channelHeadersJson)}</textarea>
+                </div>
+                <p class="subtle">适用于自定义 OpenClaw 兼容服务需要额外 Header 的场景。留空或 <code>{}</code> 表示不附加。</p>
+
+                <div class="card-head" style="margin-top:18px;">
+                  <div>
+                    <h3>助手设置</h3>
+                    ${
+                      activeProviderOption
+                        ? `<p>${escapeHtml(activeProviderOption.description)}</p>`
+                        : ""
+                    }
+                  </div>
+                </div>
+                <div class="field">
                   <label for="providerKind">助手模式</label>
                   <select id="providerKind" name="providerKind">
-                    <option value="mock" ${settingsDraft.providerKind === "mock" ? "selected" : ""}>演示助手</option>
-                    <option value="deepseek" ${settingsDraft.providerKind === "deepseek" ? "selected" : ""}>DeepSeek</option>
-                    <option value="openai" ${settingsDraft.providerKind === "openai" ? "selected" : ""}>OpenAI 兼容</option>
-                    ${showCodexOption ? `<option value="codex" ${settingsDraft.providerKind === "codex" ? "selected" : ""}>Codex（高级）</option>` : ""}
+                    ${renderProviderOptions(snapshot, settingsDraft.providerKind, showCodexOption)}
                   </select>
                 </div>
                 <div class="switch-row">
@@ -291,29 +439,39 @@ function render() {
                     ${presetOptions(settingsDraft.assistantPreset)}
                   </select>
                 </div>
-                <div class="field" style="${showDeepSeekFields ? "" : "display:none;"}">
-                  <label for="deepseekModel">DeepSeek 模型</label>
-                  <select id="deepseekModel" name="deepseekModel">
-                    <option value="deepseek-chat" ${settingsDraft.deepseekModel === "deepseek-chat" ? "selected" : ""}>deepseek-chat</option>
-                    <option value="deepseek-reasoner" ${settingsDraft.deepseekModel === "deepseek-reasoner" ? "selected" : ""}>deepseek-reasoner</option>
-                  </select>
-                </div>
-                <div class="field" style="${showDeepSeekFields ? "" : "display:none;"}">
-                  <label for="deepseekApiKey">DeepSeek API Key</label>
-                  <input id="deepseekApiKey" name="deepseekApiKey" value="${escapeHtml(settingsDraft.deepseekApiKey)}" placeholder="${snapshot.settings.deepseekApiKeyMasked ? escapeHtml(snapshot.settings.deepseekApiKeyMasked) : "留空表示不更新"}" />
-                </div>
-                <div class="field" style="${showOpenAiFields ? "" : "display:none;"}">
-                  <label for="openaiBaseUrl">Base URL</label>
-                  <input id="openaiBaseUrl" name="openaiBaseUrl" value="${escapeHtml(settingsDraft.openaiBaseUrl)}" placeholder="https://api.openai.com/v1" />
-                </div>
-                <div class="field" style="${showOpenAiFields ? "" : "display:none;"}">
-                  <label for="openaiModel">Model</label>
-                  <input id="openaiModel" name="openaiModel" value="${escapeHtml(settingsDraft.openaiModel)}" placeholder="gpt-4o-mini" />
-                </div>
-                <div class="field" style="${showOpenAiFields ? "" : "display:none;"}">
-                  <label for="openaiApiKey">API Key</label>
-                  <input id="openaiApiKey" name="openaiApiKey" value="${escapeHtml(settingsDraft.openaiApiKey)}" placeholder="${snapshot.settings.openaiApiKeyMasked ? escapeHtml(snapshot.settings.openaiApiKeyMasked) : "留空表示不更新"}" />
-                </div>
+
+                ${
+                  showCloudFields
+                    ? `
+                    <div class="field">
+                      <label for="providerBaseUrl">Base URL</label>
+                      <input id="providerBaseUrl" name="providerBaseUrl" value="${escapeHtml(settingsDraft.providerBaseUrl)}" placeholder="${escapeHtml(activeProviderOption?.defaultBaseUrl || "https://api.example.com/v1")}" />
+                    </div>
+                    <div class="field">
+                      <label for="providerModel">Model</label>
+                      <input id="providerModel" name="providerModel" value="${escapeHtml(settingsDraft.providerModel)}" placeholder="${escapeHtml(activeProviderOption?.modelPlaceholder || "填写模型名称")}" />
+                    </div>
+                    <div class="field" style="${activeProviderKind === "custom" ? "" : "display:none;"}">
+                      <label for="providerApiStyle">API 协议</label>
+                      <select id="providerApiStyle" name="providerApiStyle">
+                        <option value="openai" ${settingsDraft.providerApiStyle === "openai" ? "selected" : ""}>OpenAI Chat Completions</option>
+                        <option value="anthropic" ${settingsDraft.providerApiStyle === "anthropic" ? "selected" : ""}>Anthropic Messages</option>
+                        <option value="gemini" ${settingsDraft.providerApiStyle === "gemini" ? "selected" : ""}>Gemini GenerateContent</option>
+                      </select>
+                    </div>
+                    ${
+                      activeProviderKind !== "custom"
+                        ? `<p class="subtle">当前协议：${escapeHtml(providerApiStyleLabel(activeProviderOption?.apiStyle || settingsDraft.providerApiStyle))}</p>`
+                        : ""
+                    }
+                    <div class="field">
+                      <label for="providerApiKey">API Key</label>
+                      <input id="providerApiKey" name="providerApiKey" value="${escapeHtml(settingsDraft.providerApiKey)}" placeholder="${snapshot.settings.providerApiKeyMasked ? escapeHtml(snapshot.settings.providerApiKeyMasked) : "留空表示不更新"}" />
+                    </div>
+                  `
+                    : ""
+                }
+
                 <div class="field" style="${showCodexFields ? "" : "display:none;"}">
                   <label for="codexWorkdir">Codex 工作目录</label>
                   <input id="codexWorkdir" name="codexWorkdir" value="${escapeHtml(settingsDraft.codexWorkdir)}" placeholder="/path/to/project" />
@@ -350,10 +508,11 @@ function render() {
               </form>
             </section>
 
-            <section class="card">
+            <section class="card logs-card">
               <div class="card-head">
                 <div>
                   <h3>运行日志</h3>
+                  <p>仅展示最近 ${snapshot.logs.length} 条，支持滚动翻阅。</p>
                 </div>
               </div>
               <div class="logs">${logs}</div>
@@ -399,57 +558,92 @@ function bindEvents() {
       if (action === "pick-codex-dir") {
         const selected = await window.wechatAgent.pickDirectory();
         if (selected) {
-          document.getElementById("codexWorkdir").value = selected;
+          syncDraftFromForm();
+          state.formDraft.codexWorkdir = selected;
+          render();
         }
       }
     });
   });
 
+  const form = document.getElementById("settings-form");
+  if (form) {
+    form.addEventListener("input", () => {
+      syncDraftFromForm();
+    });
+    form.addEventListener("change", () => {
+      syncDraftFromForm();
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const draft = syncDraftFromForm();
+      await call("saveSettings", {
+        advancedModeEnabled: draft.advancedModeEnabled,
+        channelBackendKind: draft.channelBackendKind,
+        channelBaseUrl: draft.channelBaseUrl,
+        channelHeadersJson: draft.channelHeadersJson,
+        providerKind: draft.providerKind,
+        previousProviderKind: state.snapshot.settings.providerKind,
+        assistantPreset: draft.assistantPreset,
+        providerBaseUrl: draft.providerBaseUrl,
+        providerModel: draft.providerModel,
+        providerApiStyle: draft.providerApiStyle,
+        providerApiKey: draft.providerApiKey,
+        codexWorkdir: draft.codexWorkdir,
+        codexModel: draft.codexModel,
+        codexSandbox: draft.codexSandbox,
+        allowUnknownContacts: draft.allowUnknownContacts,
+        resetHistories: draft.resetHistories
+      });
+      if (!state.error) {
+        state.formDraft = {
+          ...draft,
+          channelHeadersJson: draft.channelHeadersJson || "{}",
+          providerApiKey: "",
+          resetHistories: false
+        };
+        render();
+      }
+    });
+  }
+
+  const channelSelect = document.getElementById("channelBackendKind");
+  if (channelSelect) {
+    channelSelect.addEventListener("change", (event) => {
+      syncDraftFromForm();
+      applyChannelDefaults(event.currentTarget.value);
+      render();
+    });
+  }
+
   const providerSelect = document.getElementById("providerKind");
   if (providerSelect) {
-    providerSelect.addEventListener("change", () => {
+    providerSelect.addEventListener("change", (event) => {
+      syncDraftFromForm();
+      applyProviderDefaults(event.currentTarget.value);
       render();
     });
   }
 
   const advancedModeCheckbox = document.getElementById("advancedModeEnabled");
   if (advancedModeCheckbox) {
-    advancedModeCheckbox.addEventListener("change", () => {
+    advancedModeCheckbox.addEventListener("change", (event) => {
+      syncDraftFromForm();
+      state.formDraft.advancedModeEnabled = event.currentTarget.checked;
       render();
-    });
-  }
-
-  const form = document.getElementById("settings-form");
-  if (form) {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const formData = new FormData(form);
-      const advancedModeEnabled = document.getElementById("advancedModeEnabled").checked;
-      await call("saveSettings", {
-        advancedModeEnabled,
-        providerKind: formData.get("providerKind"),
-        previousProviderKind: state.snapshot.settings.providerKind,
-        assistantPreset: formData.get("assistantPreset"),
-        deepseekModel: formData.get("deepseekModel"),
-        deepseekApiKey: formData.get("deepseekApiKey"),
-        openaiBaseUrl: formData.get("openaiBaseUrl"),
-        openaiModel: formData.get("openaiModel"),
-        openaiApiKey: formData.get("openaiApiKey"),
-        codexWorkdir: formData.get("codexWorkdir"),
-        codexModel: formData.get("codexModel"),
-        codexSandbox: formData.get("codexSandbox"),
-        allowUnknownContacts: document.getElementById("allowUnknownContacts").checked,
-        resetHistories: document.getElementById("resetHistories").checked
-      });
     });
   }
 }
 
 async function bootstrap() {
   state.snapshot = await window.wechatAgent.getSnapshot();
+  state.formDraft = buildDraftFromSnapshot(state.snapshot);
   render();
   window.wechatAgent.onSnapshot((snapshot) => {
     state.snapshot = snapshot;
+    if (!state.formDraft) {
+      state.formDraft = buildDraftFromSnapshot(snapshot);
+    }
     render();
   });
 }

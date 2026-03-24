@@ -4,9 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import {
+  getProviderDefinition,
+  getProviderLabel,
+  isCloudProviderKind
+} from "./provider-catalog";
 import type {
   AssistantPresetId,
   ContactEntry,
+  ProviderApiStyle,
   ProviderSettings
 } from "./types";
 
@@ -18,20 +24,63 @@ interface ProviderReplyInput {
   incomingText: string;
 }
 
+interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export async function generateReply(input: ProviderReplyInput): Promise<string> {
   if (input.settings.kind === "codex") {
     return generateCodexReply(input);
   }
 
-  if (input.settings.kind === "deepseek") {
-    return generateDeepSeekReply(input);
-  }
-
-  if (input.settings.kind === "openai") {
-    return generateOpenAiReply(input);
+  if (isCloudProviderKind(input.settings.kind)) {
+    return generateCloudReply(input);
   }
 
   return generateMockReply(input);
+}
+
+async function generateCloudReply({
+  settings,
+  contact,
+  incomingText
+}: ProviderReplyInput): Promise<string> {
+  const definition = getProviderDefinition(settings.kind);
+  const apiKey = settings.apiKey.trim();
+  const model = settings.model.trim();
+  const baseUrl = settings.baseUrl.trim();
+
+  if (!apiKey) {
+    throw new Error(`${definition.label} 模式缺少 API Key`);
+  }
+  if (!model) {
+    throw new Error(`${definition.label} 模式缺少模型名称`);
+  }
+  if (!baseUrl) {
+    throw new Error(`${definition.label} 模式缺少 Base URL`);
+  }
+
+  switch (settings.apiStyle) {
+    case "anthropic":
+      return generateAnthropicReply({
+        settings,
+        contact,
+        incomingText
+      });
+    case "gemini":
+      return generateGeminiReply({
+        settings,
+        contact,
+        incomingText
+      });
+    default:
+      return generateOpenAiCompatibleReply({
+        settings,
+        contact,
+        incomingText
+      });
+  }
 }
 
 async function generateCodexReply({
@@ -100,93 +149,165 @@ async function generateCodexReply({
   }
 }
 
-async function generateDeepSeekReply({
+async function generateOpenAiCompatibleReply({
   settings,
   contact,
   incomingText
 }: ProviderReplyInput): Promise<string> {
-  const apiKey = settings.deepseekApiKey.trim();
-  if (!apiKey) {
-    throw new Error("DeepSeek 模式缺少 API Key");
-  }
-
-  const model = settings.deepseekModel.trim() || "deepseek-chat";
-  const requestBody = {
-    model,
-    messages: buildOpenAiMessages(
-      settings.assistantPreset,
-      contact,
-      incomingText
+  const definition = getProviderDefinition(settings.kind);
+  const response = await fetch(
+    buildEndpointUrl(
+      settings.baseUrl,
+      definition.endpointPath ?? "/chat/completions"
     ),
-    ...(model === "deepseek-reasoner" ? {} : { temperature: 0.6 })
-  };
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${settings.apiKey.trim()}`
+      },
+      body: JSON.stringify({
+        model: settings.model.trim(),
+        messages: buildOpenAiMessages(
+          settings.assistantPreset,
+          contact,
+          incomingText
+        ),
+        ...(shouldSendTemperature(settings.kind, settings.model) ? { temperature: 0.6 } : {})
+      })
+    }
+  );
 
-  const response = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(requestBody)
-  });
-
-  const payload = (await response.json()) as {
+  const payload = (await safeReadJson(response)) as {
     error?: { message?: string };
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
   };
 
   if (!response.ok) {
-    throw new Error(payload.error?.message || `DeepSeek 接口异常 (${response.status})`);
+    throw new Error(payload.error?.message || `${definition.label} 接口异常 (${response.status})`);
   }
 
-  const content = payload.choices?.[0]?.message?.content?.trim();
+  const content = extractChatCompletionContent(payload.choices?.[0]?.message?.content);
   if (!content) {
-    throw new Error("DeepSeek 返回了空内容");
+    throw new Error(`${definition.label} 返回了空内容`);
   }
 
   return formatForWechat(content);
 }
 
-async function generateOpenAiReply({
+async function generateAnthropicReply({
   settings,
   contact,
   incomingText
 }: ProviderReplyInput): Promise<string> {
-  const apiKey = settings.openaiApiKey.trim();
-  if (!apiKey) {
-    throw new Error("OpenAI 兼容模式缺少 API Key");
-  }
+  const definition = getProviderDefinition(settings.kind);
+  const response = await fetch(
+    buildEndpointUrl(settings.baseUrl, definition.endpointPath ?? "/messages"),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": settings.apiKey.trim()
+      },
+      body: JSON.stringify({
+        model: settings.model.trim(),
+        system: presetPrompt(settings.assistantPreset),
+        max_tokens: 1024,
+        temperature: 0.6,
+        messages: buildConversationMessages(contact, incomingText).map((item) => ({
+          role: item.role,
+          content: [
+            {
+              type: "text",
+              text: item.content
+            }
+          ]
+        }))
+      })
+    }
+  );
 
-  const baseUrl = settings.openaiBaseUrl.replace(/\/+$/, "");
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: settings.openaiModel,
-      messages: buildOpenAiMessages(
-        settings.assistantPreset,
-        contact,
-        incomingText
-      ),
-      temperature: 0.6
-    })
-  });
-
-  const payload = (await response.json()) as {
+  const payload = (await safeReadJson(response)) as {
     error?: { message?: string };
-    choices?: Array<{ message?: { content?: string } }>;
+    content?: Array<{ type?: string; text?: string }>;
   };
 
   if (!response.ok) {
-    throw new Error(payload.error?.message || `模型接口异常 (${response.status})`);
+    throw new Error(payload.error?.message || `${definition.label} 接口异常 (${response.status})`);
   }
 
-  const content = payload.choices?.[0]?.message?.content?.trim();
+  const content = payload.content
+    ?.filter((item) => item.type === "text" && item.text)
+    .map((item) => item.text?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
   if (!content) {
-    throw new Error("模型返回了空内容");
+    throw new Error(`${definition.label} 返回了空内容`);
+  }
+
+  return formatForWechat(content);
+}
+
+async function generateGeminiReply({
+  settings,
+  contact,
+  incomingText
+}: ProviderReplyInput): Promise<string> {
+  const definition = getProviderDefinition(settings.kind);
+  const response = await fetch(
+    buildGeminiUrl(settings.baseUrl, settings.model, settings.apiKey),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [
+            {
+              text: presetPrompt(settings.assistantPreset)
+            }
+          ]
+        },
+        contents: buildConversationMessages(contact, incomingText).map((item) => ({
+          role: item.role === "assistant" ? "model" : "user",
+          parts: [
+            {
+              text: item.content
+            }
+          ]
+        })),
+        generationConfig: {
+          temperature: 0.6
+        }
+      })
+    }
+  );
+
+  const payload = (await safeReadJson(response)) as {
+    error?: { message?: string };
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{ text?: string }>;
+      };
+    }>;
+  };
+
+  if (!response.ok) {
+    throw new Error(payload.error?.message || `${definition.label} 接口异常 (${response.status})`);
+  }
+
+  const content = payload.candidates?.[0]?.content?.parts
+    ?.map((item) => item.text?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+  if (!content) {
+    throw new Error(`${definition.label} 返回了空内容`);
   }
 
   return formatForWechat(content);
@@ -197,27 +318,35 @@ function buildOpenAiMessages(
   contact: ContactEntry,
   incomingText: string
 ) {
+  return [
+    {
+      role: "system",
+      content: presetPrompt(preset)
+    },
+    ...buildConversationMessages(contact, incomingText)
+  ];
+}
+
+function buildConversationMessages(
+  contact: ContactEntry,
+  incomingText: string
+): ConversationMessage[] {
   const history = contact.history.slice(-10).map((item) => ({
     role: item.role,
     content: item.text
   }));
 
   const lastMessage = history[history.length - 1];
+  if (lastMessage?.role === "user" && lastMessage.content === incomingText) {
+    return history;
+  }
 
   return [
-    {
-      role: "system",
-      content: presetPrompt(preset)
-    },
     ...history,
-    ...(lastMessage?.role === "user" && lastMessage.content === incomingText
-      ? []
-      : [
-          {
-            role: "user",
-            content: incomingText
-          }
-        ])
+    {
+      role: "user",
+      content: incomingText
+    }
   ];
 }
 
@@ -268,7 +397,7 @@ function generateMockReply({
           ? `当前这位联系人已经有 ${historyCount} 轮上下文，我会继续沿着同一话题回复。`
           : "这是这个联系人的第一轮对话，我会从零开始回复。",
         "",
-        "如果你想接入真实模型，可以切换到“DeepSeek”模式并填写 API Key。"
+        `如果你想接入真实模型，可以切换到“${getProviderLabel("deepseek")}”等供应商并填写 API Key。`
       ].join("\n");
   }
 }
@@ -316,8 +445,7 @@ function buildCodexPrompt(
     `当前沙箱模式：${sandbox === "read-only" ? "只读" : "允许在工作目录内修改文件"}`,
     sandbox === "read-only"
       ? "如果用户要求你改代码，请明确告诉他你当前处于只读模式，可以先给出修改建议。"
-      : "如果你确实修改了文件，请在回复里明确说明改了什么文件。"
-    ,
+      : "如果你确实修改了文件，请在回复里明确说明改了什么文件。",
     "请结合当前工作目录里的代码和文件来回答。",
     history ? `最近上下文：\n${history}` : "最近上下文：无",
     `当前用户消息：\n${incomingText}`
@@ -348,4 +476,60 @@ function formatForWechat(text: string): string {
   output = output.replace(/^#{1,6}\s+/gm, "");
   output = output.replace(/\n{3,}/g, "\n\n");
   return output.trim();
+}
+
+function buildEndpointUrl(baseUrl: string, endpointPath: string): string {
+  const trimmedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+  const normalizedPath = endpointPath.startsWith("/") ? endpointPath : `/${endpointPath}`;
+  if (trimmedBaseUrl.endsWith(normalizedPath)) {
+    return trimmedBaseUrl;
+  }
+  return `${trimmedBaseUrl}${normalizedPath}`;
+}
+
+function buildGeminiUrl(baseUrl: string, model: string, apiKey: string): string {
+  const trimmedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+  const url = new URL(`${trimmedBaseUrl}/models/${encodeURIComponent(model.trim())}:generateContent`);
+  url.searchParams.set("key", apiKey.trim());
+  return url.toString();
+}
+
+function shouldSendTemperature(
+  kind: ProviderReplyInput["settings"]["kind"],
+  model: string
+): boolean {
+  return !(kind === "deepseek" && model.toLowerCase().includes("reasoner"));
+}
+
+function extractChatCompletionContent(
+  value: string | Array<{ text?: string }> | undefined
+): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => item.text?.trim() ?? "")
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  return "";
+}
+
+async function safeReadJson(response: Response): Promise<unknown> {
+  const raw = await response.text();
+  if (!raw.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {
+      error: {
+        message: raw.trim()
+      }
+    };
+  }
 }

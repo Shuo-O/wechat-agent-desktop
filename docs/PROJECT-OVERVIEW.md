@@ -12,8 +12,9 @@
 - 本地 JSON 持久化
 - OpenClaw / iLink 协议接入
 - 可选 Provider：
-  - DeepSeek
-  - OpenAI 兼容接口
+  - 国内热门：DeepSeek、通义千问、智谱 GLM、豆包、Kimi、SiliconFlow
+  - 国际热门：OpenAI、Anthropic Claude、Google Gemini、xAI Grok、OpenRouter
+  - 自定义接口
   - Codex CLI
 
 ## 启动方式
@@ -58,6 +59,7 @@ wechat-agent-desktop/
 │   │   ├── main.ts
 │   │   ├── openclaw.ts
 │   │   ├── preload.ts
+│   │   ├── provider-catalog.ts
 │   │   ├── session-engine.ts
 │   │   ├── store.ts
 │   │   ├── types.ts
@@ -109,8 +111,13 @@ wechat-agent-desktop/
 ### [`src/main/agent-provider.ts`](../src/main/agent-provider.ts)
 
 - 统一 Provider 抽象
-- 当前支持 `mock`、`deepseek`、`openai`、`codex`
+- 当前支持 `mock`、多家云端供应商、`custom`、`codex`
 - 把不同来源的回复统一整理成适合微信发送的文本
+
+### [`src/main/provider-catalog.ts`](../src/main/provider-catalog.ts)
+
+- 维护供应商预设、默认地址、默认模型和协议类型
+- 作为主进程和前端设置表单的共享配置源
 
 ### [`src/main/store.ts`](../src/main/store.ts)
 
@@ -134,11 +141,12 @@ flowchart LR
     IPC --> App["AppService"]
     App --> Store["本地 JSON"]
     App --> Session["SessionEngine"]
-    App --> Provider["Provider Layer"]
+    App --> Provider["Provider Catalog + Adapter Layer"]
     App --> WeChat["微信接入层"]
     WeChat --> OpenClaw["OpenClaw / iLink 协议"]
-    Provider --> DeepSeek["DeepSeek API"]
-    Provider --> OpenAI["OpenAI 兼容接口"]
+    Provider --> Domestic["国内热门供应商"]
+    Provider --> Global["国际热门供应商"]
+    Provider --> Custom["自定义接口"]
     Provider --> Codex["Codex CLI"]
 ```
 
@@ -153,4 +161,4 @@ flowchart LR
 
 ## 中文总结
 
-这个项目的核心不是再做一个协议 SDK，而是把微信接入和 Agent 接入产品化。当前实现已经具备“扫码登录微信 + 真实模型回复 + 高级模式接入 Codex”的 MVP 能力，方向上是对的；后续最值得优先补的，不是继续堆更多 Provider，而是把媒体消息、可视化调试、自动恢复和打包分发做扎实。
+这个项目的核心不是再做一个协议 SDK，而是把微信接入和 Agent 接入产品化。当前实现已经把“扫码登录微信 + 多供应商文本回复 + 高级模式接入 Codex”这一条主链打通；下一步更值得优先补的，是供应商级密钥管理、媒体消息、自动化测试和更细的多账号配置。

@@ -1,13 +1,14 @@
+import { getProviderLabel, isCloudProviderKind } from "./provider-catalog";
 import { generateReply } from "./agent-provider";
+import type { ChannelAdapter } from "./channel-adapter";
 import type { JsonStore } from "./store";
 import type { AppSettings, InboundMessage } from "./types";
-import type { WechatGateway } from "./wechat-gateway";
 
 const HISTORY_LIMIT = 16;
 
 export class SessionEngine {
   private readonly store: JsonStore;
-  private readonly gateway: WechatGateway;
+  private readonly channelAdapter: ChannelAdapter;
   private readonly onChanged: () => void;
   private readonly log: (level: "info" | "warn" | "error", message: string) => void;
   private readonly queues = new Map<string, InboundMessage[]>();
@@ -15,12 +16,12 @@ export class SessionEngine {
 
   constructor(params: {
     store: JsonStore;
-    gateway: WechatGateway;
+    channelAdapter: ChannelAdapter;
     onChanged: () => void;
     log: (level: "info" | "warn" | "error", message: string) => void;
   }) {
     this.store = params.store;
-    this.gateway = params.gateway;
+    this.channelAdapter = params.channelAdapter;
     this.onChanged = params.onChanged;
     this.log = params.log;
   }
@@ -79,7 +80,7 @@ export class SessionEngine {
         this.onChanged();
 
         try {
-          await this.gateway.sendTyping(contactId, current.contextToken).catch(() => undefined);
+          await this.channelAdapter.sendTyping(contactId, current.contextToken).catch(() => undefined);
 
           const reply = await generateReply({
             settings: settings.provider,
@@ -87,7 +88,7 @@ export class SessionEngine {
             incomingText: current.text
           });
 
-          await this.gateway.sendReplyText(contactId, current.contextToken, reply);
+          await this.channelAdapter.sendText(contactId, current.contextToken, reply);
 
           this.store.update((draft) => {
             const contact = draft.contacts[contactId];
@@ -116,7 +117,7 @@ export class SessionEngine {
           this.log("error", `联系人 ${contactId} 回复失败：${message}`);
 
           try {
-            await this.gateway.sendReplyText(
+            await this.channelAdapter.sendText(
               contactId,
               current.contextToken,
               `抱歉，我现在暂时无法回复。\n\n原因：${message}`
@@ -140,11 +141,8 @@ function normalizeError(error: unknown, settings: AppSettings): string {
     if (settings.provider.kind === "codex" && error.message.includes("登录")) {
       return "Codex 尚未登录，请先在终端执行 codex login";
     }
-    if (settings.provider.kind === "deepseek" && error.message.includes("API Key")) {
-      return "尚未填写 DeepSeek API Key";
-    }
-    if (settings.provider.kind === "openai" && error.message.includes("API Key")) {
-      return "尚未填写模型接口的 API Key";
+    if (isCloudProviderKind(settings.provider.kind) && error.message.includes("API Key")) {
+      return `尚未填写 ${getProviderLabel(settings.provider.kind)} API Key`;
     }
     return error.message;
   }

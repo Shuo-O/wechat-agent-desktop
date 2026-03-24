@@ -2,7 +2,7 @@
 
 `WeChat Agent Desktop` 是一个把微信扫码登录、消息轮询、联系人上下文和 AI 助手接入打包成桌面应用的实验性项目。它面向“不想自己搭协议层、也不想在命令行里折腾”的用户，让微信私聊接入助手这件事更接近开箱即用。
 
-本项目当前基于 OpenClaw / iLink 协议做微信接入，支持 DeepSeek、OpenAI 兼容接口和 Codex CLI 等多种回复来源。
+本项目当前基于 OpenClaw / iLink 协议做微信接入，支持国内外热门 AI 供应商、自定义兼容接口和 Codex CLI 等多种回复来源。
 
 ## 开源说明
 
@@ -26,8 +26,9 @@
 - 本地 JSON 持久化
 - OpenClaw / iLink 协议接入
 - 可选 Provider：
-  - DeepSeek
-  - OpenAI 兼容接口
+  - 国内热门：DeepSeek、通义千问、智谱 GLM、豆包、Kimi、SiliconFlow
+  - 国际热门：OpenAI、Anthropic Claude、Google Gemini、xAI Grok、OpenRouter
+  - 自定义接口：OpenAI / Anthropic / Gemini 协议
   - Codex CLI
 
 ## 功能概览
@@ -39,8 +40,9 @@
 - 联系人开关、上下文清空、运行日志查看
 - 多种助手模式：
   - `演示助手`
-  - `DeepSeek`
-  - `OpenAI 兼容`
+  - `国内热门供应商`
+  - `国际热门供应商`
+  - `自定义接口`
   - `Codex（高级）`
 
 ## 启动方式
@@ -96,7 +98,7 @@ release/
 
 - 打包产物已内置 Electron 运行时
 - `演示助手` 不依赖外部模型
-- `DeepSeek` / `OpenAI 兼容` 需要用户自行填写 API Key
+- 云端供应商模式需要用户自行填写 API Key
 - `Codex（高级）` 需要本机已安装并登录 `codex`
 - macOS 未签名应用首次启动可能需要手动放行
 
@@ -121,6 +123,7 @@ wechat-agent-desktop/
 │   │   ├── main.ts
 │   │   ├── openclaw.ts
 │   │   ├── preload.ts
+│   │   ├── provider-catalog.ts
 │   │   ├── session-engine.ts
 │   │   ├── store.ts
 │   │   ├── types.ts
@@ -142,7 +145,7 @@ wechat-agent-desktop/
 2. 应用通过 OpenClaw / iLink 拉取二维码内容并生成本地二维码
 3. 用户扫码确认后，应用保存微信登录态并启动长轮询
 4. 新私聊消息进入后，系统按联系人维护独立上下文
-5. `SessionEngine` 根据当前 Provider 生成回复
+5. `SessionEngine` 根据当前 Provider 和协议适配器生成回复
 6. `WechatGateway` 把文本消息和 typing 状态回发给微信
 7. `JsonStore` 持久化设置、联系人、运行日志和登录态
 
@@ -175,8 +178,13 @@ wechat-agent-desktop/
 ### `src/main/agent-provider.ts`
 
 - 统一封装不同 Provider
-- 当前支持 `mock`、`deepseek`、`openai`、`codex`
+- 当前支持 `mock`、多家云端供应商、`custom`、`codex`
 - 负责把回复整理成适合微信发送的文本
+
+### `src/main/provider-catalog.ts`
+
+- 维护供应商目录、默认地址、默认模型和协议类型
+- 作为前端表单和主进程请求分发的单一来源
 
 ### `src/main/store.ts`
 
@@ -191,6 +199,7 @@ wechat-agent-desktop/
 - `Codex` 模式依赖用户本机已安装并登录 `codex`
 - 当前没有自动化测试，仍以手工验证为主
 - 登录凭证和 API Key 当前保存在本地 JSON 文件中，未做系统级密钥托管
+- 不同供应商的模型名和权限策略不同，默认模型更像模板值，必要时需要用户手动调整
 
 ## Mermaid 图
 
@@ -200,11 +209,12 @@ flowchart LR
     IPC --> App["AppService"]
     App --> Store["本地 JSON"]
     App --> Session["SessionEngine"]
-    App --> Provider["Provider Layer"]
+    App --> Provider["Provider Catalog + Adapter Layer"]
     App --> WeChat["微信接入层"]
     WeChat --> OpenClaw["OpenClaw / iLink 协议"]
-    Provider --> DeepSeek["DeepSeek API"]
-    Provider --> OpenAI["OpenAI 兼容接口"]
+    Provider --> Domestic["国内热门供应商"]
+    Provider --> Global["国际热门供应商"]
+    Provider --> Custom["自定义兼容接口"]
     Provider --> Codex["Codex CLI"]
 ```
 
@@ -239,8 +249,9 @@ flowchart LR
 ## 阅读后建议先做什么
 
 - 想快速跑通闭环：先用 `演示助手`
-- 想验证真实模型：切到 `DeepSeek`
-- 想接其它兼容服务：使用 `OpenAI 兼容`
+- 想验证国内模型：切到 `DeepSeek` 或 `通义千问`
+- 想验证国外模型：切到 `OpenAI`、`Claude` 或 `Gemini`
+- 想接其它兼容服务：使用 `自定义接口`
 - 想接本地代码仓库：开启高级模式后使用 `Codex`
 
 ## 中文总结

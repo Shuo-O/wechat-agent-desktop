@@ -5,6 +5,7 @@
 - 普通用户看到的是“微信智能助手桌面版”
 - OpenClaw/iLink 只是内置的微信接入内核
 - DeepSeek 是默认推荐的真实模型模式
+- 云端模型通过 Provider Catalog 统一管理国内外供应商预设
 - Codex 是高级代码助手模式
 
 ## 当前架构
@@ -15,7 +16,7 @@ flowchart LR
     IPC --> App["AppService"]
     App --> WeChat["内置微信接入内核"]
     App --> Session["SessionEngine"]
-    App --> Provider["Provider Layer"]
+    App --> Provider["Provider Catalog + Adapter Layer"]
     App --> Store["本地 JSON 存储"]
     WeChat --> OpenClaw["OpenClaw / iLink 协议"]
 ```
@@ -39,8 +40,22 @@ flowchart LR
 - 当前支持：
   - `mock`
   - `deepseek`
+  - `qwen`
+  - `zhipu`
+  - `doubao`
+  - `kimi`
+  - `siliconflow`
   - `openai`
+  - `anthropic`
+  - `gemini`
+  - `xai`
+  - `openrouter`
+  - `custom`
   - `codex`
+
+### `src/main/provider-catalog.ts`
+- 维护供应商目录、默认地址和默认模型
+- 决定每个供应商使用哪种协议适配器
 
 ### `src/main/store.ts`
 - 使用本地 JSON 保存配置、联系人、日志和微信状态
@@ -50,8 +65,9 @@ flowchart LR
 
 ### 标准模式
 - 演示助手
-- DeepSeek
-- OpenAI 兼容
+- 国内热门供应商
+- 国际热门供应商
+- 自定义接口
 
 特点：
 - 普通用户可用

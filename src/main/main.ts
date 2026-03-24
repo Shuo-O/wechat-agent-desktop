@@ -37,10 +37,10 @@ function configureAppPaths(): void {
 function createWindow(): void {
   const preloadPath = path.join(__dirname, "preload.js");
   mainWindow = new BrowserWindow({
-    width: 1380,
-    height: 920,
-    minWidth: 1200,
-    minHeight: 760,
+    width: 1280,
+    height: 860,
+    minWidth: 880,
+    minHeight: 640,
     backgroundColor: "#f3efe7",
     title: "微信智能助手桌面版",
     webPreferences: {

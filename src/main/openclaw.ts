@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+export interface OpenClawRequestOptions {
+  requestHeaders?: Record<string, string>;
+}
+
 export class OpenClawApiError extends Error {
   readonly code?: number;
 
@@ -12,7 +16,10 @@ export class OpenClawApiError extends Error {
   }
 }
 
-function buildHeaders(token?: string): Record<string, string> {
+function buildHeaders(
+  token?: string,
+  requestHeaders: Record<string, string> = {}
+): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     AuthorizationType: "ilink_bot_token",
@@ -23,7 +30,10 @@ function buildHeaders(token?: string): Record<string, string> {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  return headers;
+  return {
+    ...headers,
+    ...requestHeaders
+  };
 }
 
 function randomWechatUin(): string {
@@ -87,12 +97,13 @@ async function post<T>(
   path: string,
   body: Record<string, unknown>,
   token?: string,
-  timeoutMs = DEFAULT_TIMEOUT_MS
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  requestHeaders: Record<string, string> = {}
 ): Promise<T> {
   const url = new URL(path, `${normalizeBaseUrl(baseUrl)}/`);
   const response = await fetch(url, {
     method: "POST",
-    headers: buildHeaders(token),
+    headers: buildHeaders(token, requestHeaders),
     body: JSON.stringify({
       ...body,
       base_info: {
@@ -105,14 +116,23 @@ async function post<T>(
   return parseResponse<T>(response);
 }
 
-export async function fetchQrCode(baseUrl: string, botType = "3") {
+export async function fetchQrCode(
+  baseUrl: string,
+  botType = "3",
+  options: OpenClawRequestOptions = {}
+) {
   return get<{ qrcode: string; qrcode_img_content: string }>(
     baseUrl,
-    `/ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(botType)}`
+    `/ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(botType)}`,
+    options.requestHeaders
   );
 }
 
-export async function fetchQrStatus(baseUrl: string, qrcode: string) {
+export async function fetchQrStatus(
+  baseUrl: string,
+  qrcode: string,
+  options: OpenClawRequestOptions = {}
+) {
   return get<{
     status: "wait" | "scaned" | "confirmed" | "expired";
     bot_token?: string;
@@ -123,7 +143,8 @@ export async function fetchQrStatus(baseUrl: string, qrcode: string) {
     baseUrl,
     `/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`,
     {
-      "iLink-App-ClientVersion": "1"
+      "iLink-App-ClientVersion": "1",
+      ...(options.requestHeaders ?? {})
     }
   );
 }
@@ -132,7 +153,8 @@ export async function getUpdates(
   baseUrl: string,
   token: string,
   cursor: string,
-  timeoutMs = 38_000
+  timeoutMs = 38_000,
+  options: OpenClawRequestOptions = {}
 ) {
   try {
     return await post<{
@@ -149,7 +171,8 @@ export async function getUpdates(
         get_updates_buf: cursor
       },
       token,
-      timeoutMs
+      timeoutMs,
+      options.requestHeaders
     );
   } catch (error) {
     if (error instanceof Error && error.name === "TimeoutError") {
@@ -167,7 +190,8 @@ export async function getTypingTicket(
   baseUrl: string,
   token: string,
   contactId: string,
-  contextToken: string
+  contextToken: string,
+  options: OpenClawRequestOptions = {}
 ) {
   return post<{
     typing_ticket?: string;
@@ -179,7 +203,8 @@ export async function getTypingTicket(
       context_token: contextToken
     },
     token,
-    10_000
+    10_000,
+    options.requestHeaders
   );
 }
 
@@ -188,7 +213,8 @@ export async function sendTyping(
   token: string,
   contactId: string,
   typingTicket: string,
-  status: 1 | 2
+  status: 1 | 2,
+  options: OpenClawRequestOptions = {}
 ) {
   return post<Record<string, unknown>>(
     baseUrl,
@@ -199,7 +225,8 @@ export async function sendTyping(
       status
     },
     token,
-    10_000
+    10_000,
+    options.requestHeaders
   );
 }
 
@@ -208,7 +235,8 @@ export async function sendTextMessage(
   token: string,
   contactId: string,
   contextToken: string,
-  text: string
+  text: string,
+  options: OpenClawRequestOptions = {}
 ) {
   return post<Record<string, unknown>>(
     baseUrl,
@@ -231,6 +259,8 @@ export async function sendTextMessage(
         ]
       }
     },
-    token
+    token,
+    DEFAULT_TIMEOUT_MS,
+    options.requestHeaders
   );
 }

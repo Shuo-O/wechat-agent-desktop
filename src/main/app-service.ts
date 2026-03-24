@@ -1,10 +1,20 @@
 import { EventEmitter } from "node:events";
 import { shell } from "electron";
 
+import {
+  getChannelBackendDefinition,
+  listChannelBackendOptions
+} from "./channel-backend-catalog";
+import {
+  getProviderDefinition,
+  listProviderOptions,
+  resolveProviderApiStyle
+} from "./provider-catalog";
+import type { ChannelAdapter } from "./channel-adapter";
+import { createChannelAdapter } from "./channel-adapter-factory";
 import { JsonStore } from "./store";
 import type { SaveSettingsInput, Snapshot } from "./types";
 import { SessionEngine } from "./session-engine";
-import { WechatGateway } from "./wechat-gateway";
 
 function maskApiKey(value: string): string {
   if (!value) {
@@ -18,16 +28,18 @@ function maskApiKey(value: string): string {
 
 export class AppService extends EventEmitter {
   private readonly store: JsonStore;
-  private readonly gateway: WechatGateway;
+  private readonly channelAdapter: ChannelAdapter;
   private readonly sessionEngine: SessionEngine;
+  private readonly channelOptions = listChannelBackendOptions();
+  private readonly providerOptions = listProviderOptions();
 
   constructor(dataDir: string) {
     super();
     this.store = new JsonStore(dataDir);
-    this.gateway = new WechatGateway(this.store, () => this.publish());
+    this.channelAdapter = createChannelAdapter(this.store, () => this.publish());
     this.sessionEngine = new SessionEngine({
       store: this.store,
-      gateway: this.gateway,
+      channelAdapter: this.channelAdapter,
       onChanged: () => this.publish(),
       log: (level, message) => this.log(level, message)
     });
@@ -40,7 +52,7 @@ export class AppService extends EventEmitter {
       return;
     }
 
-    await this.gateway.beginLogin(false);
+    await this.channelAdapter.beginLogin(false);
     this.log("info", "已恢复本地微信登录态");
     await this.startRuntime();
   }
@@ -53,17 +65,21 @@ export class AppService extends EventEmitter {
       settings: {
         allowUnknownContacts: data.settings.allowUnknownContacts,
         advancedModeEnabled: data.settings.advancedModeEnabled,
+        channelBackendKind: data.settings.channel.kind,
+        channelBaseUrl: data.settings.channel.baseUrl,
+        channelHeadersJson: serializeHeaders(data.settings.channel.requestHeaders),
         providerKind: data.settings.provider.kind,
         assistantPreset: data.settings.provider.assistantPreset,
-        deepseekModel: data.settings.provider.deepseekModel,
-        deepseekApiKeyMasked: maskApiKey(data.settings.provider.deepseekApiKey),
-        openaiBaseUrl: data.settings.provider.openaiBaseUrl,
-        openaiModel: data.settings.provider.openaiModel,
-        openaiApiKeyMasked: maskApiKey(data.settings.provider.openaiApiKey),
+        providerBaseUrl: data.settings.provider.baseUrl,
+        providerModel: data.settings.provider.model,
+        providerApiStyle: data.settings.provider.apiStyle,
+        providerApiKeyMasked: maskApiKey(data.settings.provider.apiKey),
         codexWorkdir: data.settings.provider.codexWorkdir,
         codexModel: data.settings.provider.codexModel,
         codexSandbox: data.settings.provider.codexSandbox
       },
+      channelOptions: this.channelOptions,
+      providerOptions: this.providerOptions,
       runtime: data.runtime,
       wechat: {
         status: data.wechat.status,
@@ -97,14 +113,14 @@ export class AppService extends EventEmitter {
     if (force && this.store.getData().runtime.isRunning) {
       this.stopRuntime();
     }
-    await this.gateway.beginLogin(force);
+    await this.channelAdapter.beginLogin(force);
     this.log("info", "微信登录流程完成");
     await this.startRuntime();
   }
 
   logoutWechat(): void {
     this.stopRuntime();
-    this.gateway.clearLogin();
+    this.channelAdapter.clearSession();
     this.log("info", "已退出微信登录");
   }
 
@@ -127,7 +143,7 @@ export class AppService extends EventEmitter {
     });
     this.publish();
 
-    void this.gateway.startMonitoring(
+    void this.channelAdapter.startMonitoring(
       async (message) => {
         await this.sessionEngine.handleInbound(message);
       },
@@ -145,7 +161,7 @@ export class AppService extends EventEmitter {
   }
 
   stopRuntime(): void {
-    this.gateway.stopMonitoring();
+    this.channelAdapter.stopMonitoring();
     this.store.update((draft) => {
       if (draft.runtime.isRunning) {
         draft.runtime.isRunning = false;
@@ -160,7 +176,7 @@ export class AppService extends EventEmitter {
   }
 
   shutdown(): void {
-    this.gateway.stopMonitoring();
+    this.channelAdapter.stopMonitoring();
     this.store.update((draft) => {
       if (draft.runtime.isRunning) {
         draft.runtime.isRunning = false;
@@ -170,23 +186,48 @@ export class AppService extends EventEmitter {
   }
 
   saveSettings(input: SaveSettingsInput): void {
+    const currentData = this.store.getData();
+    const parsedHeaders = parseHeadersJson(input.channelHeadersJson);
+    const channelDefinition = getChannelBackendDefinition(input.channelBackendKind);
+    const nextChannelBaseUrl = input.channelBaseUrl.trim() || channelDefinition.defaultBaseUrl;
+    const channelChanged =
+      currentData.settings.channel.kind !== input.channelBackendKind
+      || currentData.settings.channel.baseUrl !== nextChannelBaseUrl
+      || !areHeadersEqual(currentData.settings.channel.requestHeaders, parsedHeaders);
+    const runtimeWasRunning = currentData.runtime.isRunning;
+
+    if (channelChanged && runtimeWasRunning) {
+      this.stopRuntime();
+    }
+
     this.store.update((draft) => {
       const providerChanged =
         Boolean(input.previousProviderKind) &&
         input.previousProviderKind !== input.providerKind;
+      const providerDefinition = getProviderDefinition(input.providerKind);
 
       draft.settings.allowUnknownContacts = input.allowUnknownContacts;
       draft.settings.advancedModeEnabled = input.advancedModeEnabled;
+      draft.settings.channel.kind = input.channelBackendKind;
+      draft.settings.channel.baseUrl = nextChannelBaseUrl;
+      draft.settings.channel.requestHeaders = parsedHeaders;
       draft.settings.provider.kind = input.providerKind;
       draft.settings.provider.assistantPreset = input.assistantPreset;
-      draft.settings.provider.deepseekModel = input.deepseekModel.trim() || draft.settings.provider.deepseekModel;
-      if (input.deepseekApiKey && input.deepseekApiKey.trim()) {
-        draft.settings.provider.deepseekApiKey = input.deepseekApiKey.trim();
-      }
-      draft.settings.provider.openaiBaseUrl = input.openaiBaseUrl.trim() || draft.settings.provider.openaiBaseUrl;
-      draft.settings.provider.openaiModel = input.openaiModel.trim() || draft.settings.provider.openaiModel;
-      if (input.openaiApiKey && input.openaiApiKey.trim()) {
-        draft.settings.provider.openaiApiKey = input.openaiApiKey.trim();
+      draft.settings.provider.apiStyle = resolveProviderApiStyle(
+        input.providerKind,
+        input.providerApiStyle
+      );
+
+      const submittedBaseUrl = input.providerBaseUrl.trim();
+      draft.settings.provider.baseUrl = submittedBaseUrl
+        || (providerChanged ? providerDefinition.defaultBaseUrl : draft.settings.provider.baseUrl);
+
+      const submittedModel = input.providerModel.trim();
+      draft.settings.provider.model = submittedModel
+        || (providerChanged ? providerDefinition.defaultModel : draft.settings.provider.model);
+
+      if (input.providerApiKey && input.providerApiKey.trim()) {
+        draft.settings.provider.apiKey = input.providerApiKey.trim();
       }
       draft.settings.provider.codexWorkdir = input.codexWorkdir.trim();
       draft.settings.provider.codexModel = input.codexModel.trim();
@@ -202,8 +243,21 @@ export class AppService extends EventEmitter {
         }
       }
     });
+
+    if (channelChanged) {
+      this.channelAdapter.clearSession();
+    }
+
     this.publish();
-    this.log("info", input.resetHistories ? "助手设置已保存，并清空了历史上下文" : "助手设置已保存");
+
+    const message = [
+      "设置已保存",
+      input.resetHistories ? "并清空了历史上下文" : "",
+      channelChanged ? "微信后端已更新，请重新扫码登录" : ""
+    ]
+      .filter(Boolean)
+      .join("，");
+    this.log(channelChanged ? "warn" : "info", message);
   }
 
   setContactEnabled(contactId: string, enabled: boolean): void {
@@ -263,4 +317,58 @@ export class AppService extends EventEmitter {
       }
     });
   }
+}
+
+function serializeHeaders(headers: Record<string, string>): string {
+  if (!Object.keys(headers).length) {
+    return "{}";
+  }
+  return JSON.stringify(headers, null, 2);
+}
+
+function parseHeadersJson(input: string): Record<string, string> {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return {};
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error("附加请求头必须是合法 JSON 对象");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("附加请求头必须是 JSON 对象，例如 {\"X-Test\":\"1\"}");
+  }
+
+  return Object.fromEntries(
+    Object.entries(parsed).map(([key, value]) => {
+      if (!key.trim()) {
+        throw new Error("附加请求头的键不能为空");
+      }
+      if (typeof value !== "string") {
+        throw new Error(`附加请求头 ${key} 的值必须是字符串`);
+      }
+      return [key, value];
+    })
+  );
+}
+
+function areHeadersEqual(
+  left: Record<string, string>,
+  right: Record<string, string>
+): boolean {
+  const leftEntries = Object.entries(left).sort(([a], [b]) => a.localeCompare(b));
+  const rightEntries = Object.entries(right).sort(([a], [b]) => a.localeCompare(b));
+
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+
+  return leftEntries.every(([key, value], index) => {
+    const [rightKey, rightValue] = rightEntries[index] ?? [];
+    return key === rightKey && value === rightValue;
+  });
 }
