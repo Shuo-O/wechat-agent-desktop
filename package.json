@@ -2,6 +2,15 @@
   "name": "wechat-agent-desktop",
   "version": "0.1.0",
   "description": "A lightweight desktop app that connects WeChat OpenClaw/iLink messages to a simple AI assistant.",
+  "author": "Shuo-O",
+  "homepage": "https://github.com/Shuo-O/wechat-agent-desktop",
+  "bugs": {
+    "url": "https://github.com/Shuo-O/wechat-agent-desktop/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shuo-O/wechat-agent-desktop.git"
+  },
   "main": "dist/main/main.js",
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -40,9 +49,13 @@
       ]
     },
     "nsis": {
+      "artifactName": "wechat-agent-desktop-${version}-${os}-${arch}-setup.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false
+    },
+    "portable": {
+      "artifactName": "wechat-agent-desktop-${version}-${os}-${arch}-portable.${ext}"
     }
   },
   "license": "MIT",
