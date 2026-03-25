@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { shell } from "electron";
 
+import { AgentCommandResolver } from "./agent-command-resolver";
 import {
   getChannelBackendDefinition,
   listChannelBackendOptions
@@ -19,7 +20,14 @@ import { createChannelAdapter } from "./channel-adapter-factory";
 import type { RuntimeAdapter } from "./runtime-adapter";
 import { createRuntimeAdapter } from "./runtime-adapter-factory";
 import { JsonStore } from "./store";
-import type { SaveSettingsInput, Snapshot } from "./types";
+import type {
+  AgentRunRecorder,
+  AppSettings,
+  ContactEntry,
+  ManualInstructionResult,
+  SaveSettingsInput,
+  Snapshot
+} from "./types";
 import { SessionEngine } from "./session-engine";
 
 function maskApiKey(value: string): string {
@@ -37,17 +45,25 @@ export class AppService extends EventEmitter {
   private readonly channelAdapter: ChannelAdapter;
   private readonly runtimeAdapter: RuntimeAdapter;
   private readonly sessionEngine: SessionEngine;
+  private readonly agentCommandResolver = new AgentCommandResolver();
   private readonly channelOptions = listChannelBackendOptions();
   private readonly runtimeOptions = listAssistantRuntimeOptions();
   private readonly providerOptions = listProviderOptions();
+  private agentCatalog = this.agentCommandResolver.getCachedCatalog();
 
   constructor(dataDir: string) {
     super();
     this.store = new JsonStore(dataDir);
     this.channelAdapter = createChannelAdapter(this.store, () => this.publish());
+    const agentRunRecorder: AgentRunRecorder = {
+      start: (input) => this.startAgentRun(input),
+      finish: (runId, patch) => this.finishAgentRun(runId, patch)
+    };
     this.runtimeAdapter = createRuntimeAdapter({
       dataDir: this.store.getDataDir(),
-      log: (level, message) => this.log(level, message)
+      log: (level, message) => this.log(level, message),
+      agentCommandResolver: this.agentCommandResolver,
+      agentRunRecorder
     });
     this.sessionEngine = new SessionEngine({
       store: this.store,
@@ -60,6 +76,7 @@ export class AppService extends EventEmitter {
 
   async initialize(): Promise<void> {
     this.resetRuntimeStateOnLaunch();
+    await this.refreshAgentCatalog(false);
 
     if (!this.store.getData().wechat.credentials) {
       return;
@@ -67,7 +84,21 @@ export class AppService extends EventEmitter {
 
     await this.channelAdapter.beginLogin(false);
     this.log("info", "已恢复本地微信登录态");
-    await this.startRuntime();
+    try {
+      await this.startRuntime();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.store.update((draft) => {
+        draft.runtime.isRunning = false;
+        draft.runtime.lastStoppedAt = new Date().toISOString();
+        draft.wechat.lastError = reason;
+        if (draft.wechat.status === "logged_in") {
+          draft.wechat.statusMessage = "已恢复登录，但自动启动失败";
+        }
+      });
+      this.publish();
+      this.log("error", `已恢复本地微信登录态，但自动启动失败：${reason}`);
+    }
   }
 
   getSnapshot(): Snapshot {
@@ -101,6 +132,8 @@ export class AppService extends EventEmitter {
       runtimeOptions: this.runtimeOptions,
       providerOptions: this.providerOptions,
       runtime: data.runtime,
+      agentCatalog: this.agentCatalog,
+      agentRuns: data.agentRuns.slice(0, 24),
       wechat: {
         status: data.wechat.status,
         qrUrl: data.wechat.qrUrl,
@@ -127,6 +160,10 @@ export class AppService extends EventEmitter {
         })),
       logs: data.logs.slice(0, 60)
     };
+  }
+
+  async refreshAgents(): Promise<void> {
+    await this.refreshAgentCatalog(true);
   }
 
   async startWechatLogin(force = false): Promise<void> {
@@ -297,6 +334,7 @@ export class AppService extends EventEmitter {
       this.channelAdapter.clearSession();
     }
 
+    await this.refreshAgentCatalog(false);
     this.publish();
 
     const message = [
@@ -359,6 +397,36 @@ export class AppService extends EventEmitter {
     await shell.openPath(this.store.getDataDir());
   }
 
+  async runManualInstruction(prompt: string): Promise<ManualInstructionResult> {
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      throw new Error("请输入要发送给 agent 的指令");
+    }
+
+    const data = this.store.getData();
+    const startedAt = new Date().toISOString();
+    const agentId = resolveCurrentAgentId(data.settings);
+    this.log("info", `开始执行 UI 手动指令：${summarizePrompt(trimmed)}`);
+    await this.runtimeAdapter.prepare(data.settings);
+
+    const reply = await this.runtimeAdapter.generateReply({
+      settings: data.settings,
+      contact: createManualConsoleContact(),
+      incomingText: trimmed
+    });
+
+    const finishedAt = new Date().toISOString();
+    this.log("info", `UI 手动指令执行完成：${summarizePrompt(trimmed)}`);
+
+    return {
+      reply,
+      runtimeKind: data.settings.assistantRuntime.kind,
+      agentId,
+      startedAt,
+      finishedAt
+    };
+  }
+
   private log(level: "info" | "warn" | "error", message: string): void {
     this.store.addLog(level, message);
     this.publish();
@@ -381,6 +449,50 @@ export class AppService extends EventEmitter {
         draft.wechat.statusMessage = "已恢复本地微信登录态";
       }
     });
+  }
+
+  private async refreshAgentCatalog(shouldLog: boolean): Promise<void> {
+    const extraAgentIds = collectTrackedAgentIds(this.store.getData().settings);
+    try {
+      this.agentCatalog = await this.agentCommandResolver.refreshCatalog(extraAgentIds);
+      this.publish();
+
+      if (shouldLog) {
+        const detectedCount = this.agentCatalog.filter((item) => item.detected).length;
+        this.log("info", `已刷新 Agent 检测，当前识别到 ${detectedCount} 个命令`);
+      }
+    } catch (error) {
+      this.agentCatalog = this.agentCommandResolver.getCachedCatalog(extraAgentIds);
+      this.publish();
+      if (shouldLog) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log("warn", `刷新 Agent 检测失败：${message}`);
+      }
+    }
+  }
+
+  private startAgentRun(input: Parameters<AgentRunRecorder["start"]>[0]): string {
+    const runId = this.store.addAgentRun({
+      ...input,
+      stdout: "",
+      stderr: "",
+      finalOutput: "",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      exitCode: null,
+      status: "running",
+      errorMessage: null
+    });
+    this.publish();
+    return runId;
+  }
+
+  private finishAgentRun(
+    runId: string,
+    patch: Parameters<AgentRunRecorder["finish"]>[1]
+  ): void {
+    this.store.updateAgentRun(runId, patch);
+    this.publish();
   }
 }
 
@@ -419,6 +531,51 @@ function parseHeadersJson(input: string): Record<string, string> {
       return [key, value];
     })
   );
+}
+
+function createManualConsoleContact(): ContactEntry {
+  return {
+    id: "__ui_console__",
+    enabled: true,
+    lastContextToken: "ui-console",
+    runtimeSessionNonce: 0,
+    status: "idle",
+    lastInboundAt: null,
+    lastReplyAt: null,
+    lastMessagePreview: "",
+    lastReplyPreview: "",
+    lastError: null,
+    history: []
+  };
+}
+
+function collectTrackedAgentIds(settings: AppSettings): string[] {
+  return [
+    "codex",
+    "openclaw",
+    settings.assistantRuntime.openclawAcpHarnessId,
+    settings.assistantRuntime.kind === "local-provider" && settings.provider.kind === "codex"
+      ? "codex"
+      : ""
+  ];
+}
+
+function resolveCurrentAgentId(settings: Parameters<typeof collectTrackedAgentIds>[0]): string {
+  if (settings.assistantRuntime.kind === "openclaw-acp") {
+    return settings.assistantRuntime.openclawAcpHarnessId || "codex";
+  }
+  if (settings.assistantRuntime.kind === "openclaw-cli") {
+    return settings.assistantRuntime.openclawAgentId || "main";
+  }
+  if (settings.provider.kind === "codex") {
+    return "codex";
+  }
+  return settings.provider.kind;
+}
+
+function summarizePrompt(prompt: string): string {
+  const normalized = prompt.replace(/\s+/g, " ").trim();
+  return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
 }
 
 function parseOpenClawTimeout(input: number): number {

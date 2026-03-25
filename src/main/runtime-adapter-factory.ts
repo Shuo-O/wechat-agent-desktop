@@ -1,17 +1,22 @@
+import type { AgentRunRecorder } from "./types";
+import { AgentCommandResolver } from "./agent-command-resolver";
 import type { RuntimeAdapter } from "./runtime-adapter";
 import { LocalProviderRuntimeAdapter } from "./runtime-adapters/local-provider-runtime-adapter";
 import { OpenClawAcpRuntimeAdapter } from "./runtime-adapters/openclaw-acp-runtime-adapter";
 import { OpenClawCliRuntimeAdapter } from "./runtime-adapters/openclaw-cli-runtime-adapter";
 
 class CompositeRuntimeAdapter implements RuntimeAdapter {
-  private readonly localProviderAdapter = new LocalProviderRuntimeAdapter();
+  private readonly localProviderAdapter: LocalProviderRuntimeAdapter;
   private readonly openclawAcpAdapter: OpenClawAcpRuntimeAdapter;
   private readonly openclawCliAdapter: OpenClawCliRuntimeAdapter;
 
   constructor(params: {
     dataDir: string;
     log?: (level: "info" | "warn" | "error", message: string) => void;
+    agentCommandResolver: AgentCommandResolver;
+    agentRunRecorder: AgentRunRecorder;
   }) {
+    this.localProviderAdapter = new LocalProviderRuntimeAdapter(params);
     this.openclawAcpAdapter = new OpenClawAcpRuntimeAdapter(params);
     this.openclawCliAdapter = new OpenClawCliRuntimeAdapter(params);
   }
@@ -50,6 +55,8 @@ class CompositeRuntimeAdapter implements RuntimeAdapter {
 export function createRuntimeAdapter(params: {
   dataDir: string;
   log?: (level: "info" | "warn" | "error", message: string) => void;
+  agentCommandResolver: AgentCommandResolver;
+  agentRunRecorder: AgentRunRecorder;
 }): RuntimeAdapter {
   return new CompositeRuntimeAdapter(params);
 }

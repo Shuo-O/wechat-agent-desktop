@@ -56,6 +56,16 @@ function createWindow(): void {
   });
 }
 
+function focusMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.focus();
+}
+
 async function bootstrap(): Promise<void> {
   service = new AppService(app.getPath("userData"));
   registerIpc(service);
@@ -73,15 +83,31 @@ async function bootstrap(): Promise<void> {
 
 configureAppPaths();
 
-app.whenReady().then(async () => {
-  await bootstrap();
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
-  app.on("activate", () => {
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      return;
     }
+    focusMainWindow();
   });
-});
+
+  app.whenReady().then(async () => {
+    await bootstrap();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+        return;
+      }
+      focusMainWindow();
+    });
+  });
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

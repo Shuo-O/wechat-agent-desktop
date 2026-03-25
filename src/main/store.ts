@@ -16,6 +16,7 @@ import {
   resolveProviderApiStyle
 } from "./provider-catalog";
 import type {
+  AgentRunEntry,
   AssistantRuntimeKind,
   AssistantRuntimeSettings,
   AppData,
@@ -33,7 +34,9 @@ import type {
 } from "./types";
 
 const MAX_LOGS = 200;
+const MAX_AGENT_RUNS = 40;
 const MAX_HISTORY = 16;
+const MAX_CAPTURED_TEXT = 24_000;
 
 function defaultChannelSettings(): ChannelBackendSettings {
   const backend = getChannelBackendDefinition("openclaw-official");
@@ -88,6 +91,7 @@ export function createEmptyData(): AppData {
   return {
     settings: defaultSettings(),
     logs: [],
+    agentRuns: [],
     contacts: {},
     wechat: {
       status: "logged_out",
@@ -166,6 +170,30 @@ export class JsonStore {
     this.persist();
   }
 
+  addAgentRun(entry: Omit<AgentRunEntry, "id">): string {
+    const nextEntry: AgentRunEntry = normalizeAgentRunEntry({
+      ...entry,
+      id: crypto.randomUUID()
+    });
+    this.data.agentRuns.unshift(nextEntry);
+    this.data.agentRuns = this.data.agentRuns.slice(0, MAX_AGENT_RUNS);
+    this.persist();
+    return nextEntry.id;
+  }
+
+  updateAgentRun(runId: string, patch: Partial<Omit<AgentRunEntry, "id">>): void {
+    const index = this.data.agentRuns.findIndex((item) => item.id === runId);
+    if (index < 0) {
+      return;
+    }
+    this.data.agentRuns[index] = normalizeAgentRunEntry({
+      ...this.data.agentRuns[index],
+      ...patch,
+      id: runId
+    });
+    this.persist();
+  }
+
   private load(): AppData {
     if (!fs.existsSync(this.filePath)) {
       const initial = createEmptyData();
@@ -194,6 +222,9 @@ export class JsonStore {
           ...createEmptyData().runtime,
           ...(parsed.runtime ?? {})
         },
+        agentRuns: Array.isArray(parsed.agentRuns)
+          ? parsed.agentRuns.map((item) => normalizeAgentRunEntry(item)).slice(0, MAX_AGENT_RUNS)
+          : [],
         contacts: parsed.contacts ?? {},
         logs: parsed.logs ?? []
       };
@@ -213,6 +244,9 @@ export class JsonStore {
         contact.status = "idle";
       }
     }
+    this.data.agentRuns = this.data.agentRuns
+      .map((item) => normalizeAgentRunEntry(item))
+      .slice(0, MAX_AGENT_RUNS);
   }
 
   private persist(): void {
@@ -308,9 +342,6 @@ function readChannelBaseUrl(
 }
 
 function readAssistantRuntimeKind(value: unknown): AssistantRuntimeKind {
-  if (value === "openclaw-acp") {
-    return "openclaw-cli";
-  }
   if (isAssistantRuntimeKind(value)) {
     return value;
   }
@@ -414,4 +445,65 @@ function readRequestHeaders(value: unknown): Record<string, string> {
 
 function readCodexSandbox(value: unknown): CodexSandboxMode {
   return value === "workspace-write" ? "workspace-write" : "read-only";
+}
+
+function normalizeAgentRunEntry(raw: unknown): AgentRunEntry {
+  const candidate = (raw ?? {}) as Partial<AgentRunEntry> & Record<string, unknown>;
+
+  return {
+    id: readString(candidate.id) || crypto.randomUUID(),
+    title: readString(candidate.title) || "Agent 执行",
+    agentId: readString(candidate.agentId) || "unknown",
+    runtimeKind: readAgentRuntimeKind(candidate.runtimeKind),
+    source: candidate.source === "ui-manual" ? "ui-manual" : "wechat-auto",
+    contactId: readNullableString(candidate.contactId),
+    command: readString(candidate.command),
+    args: Array.isArray(candidate.args)
+      ? candidate.args.map((item) => readString(item)).filter(Boolean)
+      : [],
+    cwd: readString(candidate.cwd),
+    prompt: trimCapturedText(readString(candidate.prompt)),
+    stdout: trimCapturedText(readString(candidate.stdout)),
+    stderr: trimCapturedText(readString(candidate.stderr)),
+    finalOutput: trimCapturedText(readString(candidate.finalOutput)),
+    startedAt: readString(candidate.startedAt) || new Date().toISOString(),
+    finishedAt: readNullableString(candidate.finishedAt),
+    exitCode: readNullableNumber(candidate.exitCode),
+    status: readAgentRunStatus(candidate.status),
+    errorMessage: readNullableString(candidate.errorMessage)
+  };
+}
+
+function trimCapturedText(value: string): string {
+  if (value.length <= MAX_CAPTURED_TEXT) {
+    return value;
+  }
+  const omittedCount = value.length - MAX_CAPTURED_TEXT;
+  return `${value.slice(0, MAX_CAPTURED_TEXT)}\n\n[已截断 ${omittedCount} 个字符]`;
+}
+
+function readNullableString(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+  return null;
+}
+
+function readNullableNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (value === null) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function readAgentRuntimeKind(value: unknown): AssistantRuntimeKind {
+  return isAssistantRuntimeKind(value) ? value : defaultAssistantRuntimeSettings().kind;
+}
+
+function readAgentRunStatus(value: unknown): AgentRunEntry["status"] {
+  return value === "success" || value === "error" ? value : "running";
 }

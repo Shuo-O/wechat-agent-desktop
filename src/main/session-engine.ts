@@ -141,16 +141,20 @@ function normalizeError(error: unknown, settings: AppSettings): string {
     if (
       settings.assistantRuntime.kind === "local-provider"
       && settings.provider.kind === "codex"
-      && error.message.includes("工作目录")
     ) {
-      return "Codex 模式尚未选择工作目录";
-    }
-    if (
-      settings.assistantRuntime.kind === "local-provider"
-      && settings.provider.kind === "codex"
-      && error.message.includes("登录")
-    ) {
-      return "Codex 尚未登录，请先在终端执行 codex login";
+      const normalized = error.message.toLowerCase();
+      if (error.message.includes("工作目录")) {
+        return "Codex 模式尚未选择工作目录";
+      }
+      if (normalized.includes("codex mcp login")) {
+        return error.message;
+      }
+      if (
+        normalized.includes("codex cli 尚未登录")
+        || (normalized.includes("codex login") && !normalized.includes("codex mcp login"))
+      ) {
+        return "Codex CLI 尚未登录，请先在终端执行 codex login";
+      }
     }
     if (
       settings.assistantRuntime.kind === "local-provider"

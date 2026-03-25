@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { AgentCommandResolver } from "../agent-command-resolver";
 import { ManagedOpenClawInstaller } from "../managed-openclaw";
 import type {
   RuntimeAdapter,
   RuntimeReplyInput
 } from "../runtime-adapter";
+import type { AgentRunRecorder } from "../types";
 
 const execFileAsync = promisify(execFile);
 const MAX_STDIO_BUFFER = 8 * 1024 * 1024;
@@ -29,13 +31,26 @@ interface OpenClawCliResponse {
 
 export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
   private readonly managedInstaller: ManagedOpenClawInstaller;
+  private readonly agentCommandResolver: AgentCommandResolver;
+  private readonly agentRunRecorder: AgentRunRecorder;
   private runChain: Promise<void> = Promise.resolve();
 
   constructor(params: {
     dataDir: string;
     log?: (level: "info" | "warn" | "error", message: string) => void;
+    agentCommandResolver: AgentCommandResolver;
+    agentRunRecorder: AgentRunRecorder;
   }) {
-    this.managedInstaller = new ManagedOpenClawInstaller(params.dataDir, params.log);
+    this.agentCommandResolver = params.agentCommandResolver;
+    this.agentRunRecorder = params.agentRunRecorder;
+    this.managedInstaller = new ManagedOpenClawInstaller(
+      params.dataDir,
+      params.log,
+      (env, settings) => this.agentCommandResolver.augmentEnv(
+        env,
+        [settings?.assistantRuntime.openclawAcpHarnessId.trim() || "codex"]
+      )
+    );
   }
 
   async prepare(inputSettings: RuntimeReplyInput["settings"]): Promise<void> {
@@ -43,6 +58,9 @@ export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const command = await this.resolveCommandPath(inputSettings);
+    await this.agentCommandResolver.resolveAgentCommand(
+      inputSettings.assistantRuntime.openclawAcpHarnessId.trim() || "codex"
+    );
     if (usesManagedOpenClaw(inputSettings)) {
       await this.managedInstaller.syncAcpRuntimeConfig(inputSettings);
       await this.managedInstaller.ensureGatewayReady(inputSettings);
@@ -54,6 +72,9 @@ export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
     return this.runExclusive(async () => {
       const runtime = input.settings.assistantRuntime;
       const command = await this.resolveCommandPath(input.settings);
+      await this.agentCommandResolver.resolveAgentCommand(
+        runtime.openclawAcpHarnessId.trim() || "codex"
+      );
       if (usesManagedOpenClaw(input.settings)) {
         await this.managedInstaller.syncAcpRuntimeConfig(input.settings);
         await this.managedInstaller.ensureGatewayReady(input.settings);
@@ -66,7 +87,8 @@ export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
         buildOpenClawGatewayArgs(input),
         runtime.openclawWorkingDir.trim() || process.cwd(),
         this.buildEnv(input.settings, command),
-        timeoutMs
+        timeoutMs,
+        input
       );
 
       if (!reply) {
@@ -93,13 +115,17 @@ export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
     inputSettings: RuntimeReplyInput["settings"],
     commandPath: string
   ): NodeJS.ProcessEnv {
+    const harnessId = inputSettings.assistantRuntime.openclawAcpHarnessId.trim() || "codex";
     if (
       inputSettings.assistantRuntime.openclawCommand.trim()
       && commandPath === inputSettings.assistantRuntime.openclawCommand.trim()
     ) {
-      return process.env;
+      return this.agentCommandResolver.augmentEnv(process.env, [harnessId]);
     }
-    return this.managedInstaller.buildEnv(inputSettings);
+    return this.agentCommandResolver.augmentEnv(
+      this.managedInstaller.buildEnv(inputSettings),
+      [harnessId]
+    );
   }
 
   private async validateAcpHarness(
@@ -122,21 +148,9 @@ export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
       // Non-fatal: catalog access differs by OpenClaw version. We only use this to warm up the gateway path.
     }
 
-    if (harnessId !== "codex") {
-      return;
-    }
-
-    try {
-      await execFileAsync(
-        "which",
-        ["codex"],
-        {
-          timeout: 5_000,
-          maxBuffer: MAX_STDIO_BUFFER
-        }
-      );
-    } catch {
-      throw new Error("未检测到 ACP harness：codex。请确认运行环境中存在 `codex` 命令，或在设置里改成其他可用 harness。");
+    const resolvedHarness = await this.agentCommandResolver.resolveAgentCommand(harnessId);
+    if (!resolvedHarness.detected) {
+      throw new Error(`未检测到 ACP harness：${harnessId}。请确认命令已安装，且路径可被应用或登录 shell 识别。`);
     }
   }
 
@@ -154,10 +168,23 @@ export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
     args: string[],
     cwd: string,
     env: NodeJS.ProcessEnv,
-    timeoutMs: number
+    timeoutMs: number,
+    input: RuntimeReplyInput
   ): Promise<string> {
     let stdout = "";
     let stderr = "";
+    const harnessId = input.settings.assistantRuntime.openclawAcpHarnessId.trim() || "codex";
+    const runId = this.agentRunRecorder.start({
+      title: input.contact.id === "__ui_console__" ? `UI 手动指令 / ACP ${harnessId}` : `微信自动回复 / ACP ${harnessId}`,
+      agentId: harnessId,
+      runtimeKind: input.settings.assistantRuntime.kind,
+      source: input.contact.id === "__ui_console__" ? "ui-manual" : "wechat-auto",
+      contactId: input.contact.id === "__ui_console__" ? null : input.contact.id,
+      command,
+      args,
+      cwd,
+      prompt: input.incomingText
+    });
     try {
       const result = await execFileAsync(command, args, {
         cwd,
@@ -169,18 +196,56 @@ export class OpenClawAcpRuntimeAdapter implements RuntimeAdapter {
       stderr = result.stderr ?? "";
     } catch (error) {
       const message = extractProcessError(error);
+      this.agentRunRecorder.finish(runId, {
+        status: "error",
+        finishedAt: new Date().toISOString(),
+        exitCode: readProcessExitCode(error),
+        stdout: (error as { stdout?: string }).stdout ?? stdout,
+        stderr: (error as { stderr?: string }).stderr ?? stderr,
+        errorMessage: message
+      });
       if (message.includes("ENOENT")) {
         throw new Error(`未检测到 OpenClaw 命令：${command}`);
       }
       throw new Error(`OpenClaw ACP 执行失败：${message}`);
     }
 
-    const payload = parseOpenClawJson(stdout, stderr);
-    const reply = formatOpenClawReply(payload);
-    if (!reply) {
-      throw new Error(payload.summary?.trim() || "OpenClaw ACP 未返回可发送的文本内容");
+    try {
+      const payload = parseOpenClawJson(stdout, stderr);
+      const reply = formatOpenClawReply(payload);
+      if (!reply) {
+        this.agentRunRecorder.finish(runId, {
+          status: "error",
+          finishedAt: new Date().toISOString(),
+          exitCode: 0,
+          stdout,
+          stderr,
+          errorMessage: payload.summary?.trim() || "OpenClaw ACP 未返回可发送的文本内容"
+        });
+        throw new Error(payload.summary?.trim() || "OpenClaw ACP 未返回可发送的文本内容");
+      }
+      this.agentRunRecorder.finish(runId, {
+        status: "success",
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+        stdout,
+        stderr,
+        finalOutput: reply,
+        errorMessage: null
+      });
+      return reply;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.agentRunRecorder.finish(runId, {
+        status: "error",
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+        stdout,
+        stderr,
+        errorMessage: message
+      });
+      throw error;
     }
-    return reply;
   }
 }
 
@@ -226,6 +291,14 @@ function extractProcessError(error: unknown): string {
     return details.trim();
   }
   return String(error);
+}
+
+function readProcessExitCode(error: unknown): number | null {
+  if (error && typeof error === "object") {
+    const candidate = error as { code?: string | number };
+    return typeof candidate.code === "number" ? candidate.code : null;
+  }
+  return null;
 }
 
 function parseOpenClawJson(stdout: string, stderr: string): OpenClawCliResponse {

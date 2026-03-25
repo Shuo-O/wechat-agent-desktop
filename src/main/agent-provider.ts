@@ -9,13 +9,16 @@ import {
   OPENAI_COMPATIBLE_TOOLS,
   type OpenAiToolCall
 } from "./assistant-tools";
+import { AgentCommandResolver } from "./agent-command-resolver";
 import {
   getProviderDefinition,
   getProviderLabel,
   isCloudProviderKind
 } from "./provider-catalog";
 import type {
+  AgentRunRecorder,
   AssistantPresetId,
+  AssistantRuntimeKind,
   ContactEntry,
   ProviderApiStyle,
   ProviderSettings
@@ -35,9 +38,19 @@ interface ConversationMessage {
   content: string;
 }
 
-export async function generateReply(input: ProviderReplyInput): Promise<string> {
+interface ProviderReplyHooks {
+  agentCommandResolver?: AgentCommandResolver;
+  agentRunRecorder?: AgentRunRecorder;
+  runtimeKind?: AssistantRuntimeKind;
+  source?: "wechat-auto" | "ui-manual";
+}
+
+export async function generateReply(
+  input: ProviderReplyInput,
+  hooks: ProviderReplyHooks = {}
+): Promise<string> {
   if (input.settings.kind === "codex") {
-    return generateCodexReply(input);
+    return generateCodexReply(input, hooks);
   }
 
   if (isCloudProviderKind(input.settings.kind)) {
@@ -93,10 +106,26 @@ async function generateCodexReply({
   settings,
   contact,
   incomingText
-}: ProviderReplyInput): Promise<string> {
+}: ProviderReplyInput, hooks: ProviderReplyHooks): Promise<string> {
   const workdir = settings.codexWorkdir.trim();
   if (!workdir) {
     throw new Error("Codex 模式尚未选择工作目录");
+  }
+
+  const resolvedCommand = hooks.agentCommandResolver
+    ? await hooks.agentCommandResolver.resolveAgentCommand("codex")
+    : {
+      command: "codex",
+      resolvedPath: "codex",
+      detected: true,
+      source: "configured" as const,
+      checkedAt: new Date().toISOString(),
+      details: null,
+      id: "codex",
+      label: "Codex CLI"
+    };
+  if (!resolvedCommand.detected || !resolvedCommand.resolvedPath) {
+    throw new Error("未检测到 Codex 命令。请确认已安装 Codex CLI，且命令路径可被应用或登录 shell 识别。");
   }
 
   const outputPath = path.join(
@@ -127,21 +156,39 @@ async function generateCodexReply({
     buildCodexPrompt(settings.assistantPreset, contact, incomingText, settings.codexSandbox)
   );
 
+  const runId = hooks.agentRunRecorder?.start({
+    title: hooks.source === "ui-manual" ? "UI 手动指令 / Codex" : "微信自动回复 / Codex",
+    agentId: "codex",
+    runtimeKind: hooks.runtimeKind ?? "local-provider",
+    source: hooks.source ?? "wechat-auto",
+    contactId: hooks.source === "ui-manual" ? null : contact.id,
+    command: resolvedCommand.resolvedPath,
+    args,
+    cwd: workdir,
+    prompt: incomingText
+  });
+
+  let stdout = "";
+  let stderr = "";
   try {
-    await execFileAsync("codex", args, {
+    const result = await execFileAsync(resolvedCommand.resolvedPath, args, {
       cwd: workdir,
       timeout: 180_000,
       maxBuffer: 8 * 1024 * 1024
     });
+    stdout = result.stdout ?? "";
+    stderr = result.stderr ?? "";
   } catch (error) {
     const message = extractProcessError(error);
-    if (message.includes("ENOENT")) {
-      throw new Error("未检测到 Codex 命令，请先在本机安装 Codex CLI");
-    }
-    if (message.toLowerCase().includes("login")) {
-      throw new Error("Codex 尚未登录，请先在终端执行 codex login");
-    }
-    throw new Error(`Codex 执行失败：${message}`);
+    hooks.agentRunRecorder?.finish(runId ?? "", {
+      status: "error",
+      finishedAt: new Date().toISOString(),
+      exitCode: readProcessExitCode(error),
+      stdout: (error as { stdout?: string }).stdout ?? stdout,
+      stderr: (error as { stderr?: string }).stderr ?? stderr,
+      errorMessage: message
+    });
+    throw new Error(normalizeCodexProcessError(message));
   }
 
   try {
@@ -149,7 +196,27 @@ async function generateCodexReply({
     if (!content) {
       throw new Error("Codex 返回了空内容");
     }
+    hooks.agentRunRecorder?.finish(runId ?? "", {
+      status: "success",
+      finishedAt: new Date().toISOString(),
+      exitCode: 0,
+      stdout,
+      stderr,
+      finalOutput: content,
+      errorMessage: null
+    });
     return formatForWechat(content);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    hooks.agentRunRecorder?.finish(runId ?? "", {
+      status: "error",
+      finishedAt: new Date().toISOString(),
+      exitCode: 0,
+      stdout,
+      stderr,
+      errorMessage: message
+    });
+    throw error;
   } finally {
     await fs.rm(outputPath, { force: true }).catch(() => undefined);
   }
@@ -563,6 +630,36 @@ function extractProcessError(error: unknown): string {
       || String(candidate.code ?? "unknown");
   }
   return String(error);
+}
+
+function normalizeCodexProcessError(message: string): string {
+  if (message.includes("ENOENT")) {
+    return "未检测到 Codex 命令。请确认已安装 Codex CLI，且命令路径可被应用或登录 shell 识别。";
+  }
+
+  const normalized = message.toLowerCase();
+  if (normalized.includes("usage limit")) {
+    return "Codex 当前额度已用尽，请稍后重试。";
+  }
+
+  const mcpLoginMatch = message.match(/codex mcp login ([a-z0-9._-]+)/i);
+  if (mcpLoginMatch) {
+    return `Codex MCP 未登录，请先在终端执行 codex mcp login ${mcpLoginMatch[1]}`;
+  }
+
+  if (normalized.includes("codex login") && !normalized.includes("codex mcp login")) {
+    return "Codex CLI 尚未登录，请先在终端执行 codex login";
+  }
+
+  return `Codex 执行失败：${message}`;
+}
+
+function readProcessExitCode(error: unknown): number | null {
+  if (error && typeof error === "object") {
+    const candidate = error as { code?: string | number };
+    return typeof candidate.code === "number" ? candidate.code : null;
+  }
+  return null;
 }
 
 function formatForWechat(text: string): string {

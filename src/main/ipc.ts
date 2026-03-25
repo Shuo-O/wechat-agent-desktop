@@ -25,6 +25,12 @@ export function registerIpc(service: AppService): void {
   ipcMain.handle("app:openDataDirectory", async () => {
     await service.openDataDirectory();
   });
+  ipcMain.handle("app:refreshAgents", async () => {
+    await service.refreshAgents();
+  });
+  ipcMain.handle("app:runManualInstruction", async (_event, prompt: string) => {
+    return service.runManualInstruction(prompt);
+  });
   ipcMain.handle("app:pickDirectory", async () => {
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"]

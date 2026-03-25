@@ -140,6 +140,10 @@ export class ManagedOpenClawInstaller {
   private readonly openclawConfigDir: string;
   private readonly workspaceDir: string;
   private readonly log?: (level: "info" | "warn" | "error", message: string) => void;
+  private readonly environmentAugmenter?: (
+    env: NodeJS.ProcessEnv,
+    settings?: AppSettings
+  ) => NodeJS.ProcessEnv;
   private installInFlight: Promise<string> | null = null;
   private setupInFlight: Promise<void> | null = null;
   private gatewayStartInFlight: Promise<void> | null = null;
@@ -147,12 +151,20 @@ export class ManagedOpenClawInstaller {
   private gatewayStopRequested = false;
   private gatewayLogTail: string[] = [];
 
-  constructor(dataDir: string, log?: (level: "info" | "warn" | "error", message: string) => void) {
+  constructor(
+    dataDir: string,
+    log?: (level: "info" | "warn" | "error", message: string) => void,
+    environmentAugmenter?: (
+      env: NodeJS.ProcessEnv,
+      settings?: AppSettings
+    ) => NodeJS.ProcessEnv
+  ) {
     this.installRoot = path.join(dataDir, "managed-openclaw");
     this.openclawHome = path.join(this.installRoot, "home");
     this.openclawConfigDir = path.join(this.openclawHome, ".openclaw");
     this.workspaceDir = path.join(this.openclawHome, "workspace");
     this.log = log;
+    this.environmentAugmenter = environmentAugmenter;
   }
 
   async ensureReady(): Promise<string> {
@@ -195,10 +207,11 @@ export class ManagedOpenClawInstaller {
       OPENCLAW_SUPPRESS_NOTES: process.env.OPENCLAW_SUPPRESS_NOTES ?? "1"
     };
     const providerEnv = buildManagedProviderEnv(settings);
-    return {
+    const merged = {
       ...env,
       ...providerEnv
     };
+    return this.environmentAugmenter ? this.environmentAugmenter(merged, settings) : merged;
   }
 
   async syncProviderConfig(settings: AppSettings): Promise<boolean> {

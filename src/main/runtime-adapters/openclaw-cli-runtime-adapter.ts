@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { AgentCommandResolver } from "../agent-command-resolver";
 import { ManagedOpenClawInstaller } from "../managed-openclaw";
 import type {
   RuntimeAdapter,
   RuntimeReplyInput
 } from "../runtime-adapter";
+import type { AgentRunRecorder } from "../types";
 
 const execFileAsync = promisify(execFile);
 const MAX_STDIO_BUFFER = 8 * 1024 * 1024;
@@ -43,13 +45,19 @@ interface GatewayChatCompletionResponse {
 
 export class OpenClawCliRuntimeAdapter implements RuntimeAdapter {
   private readonly managedInstaller: ManagedOpenClawInstaller;
+  private readonly agentCommandResolver: AgentCommandResolver;
+  private readonly agentRunRecorder: AgentRunRecorder;
   private runChain: Promise<void> = Promise.resolve();
 
   constructor(params: {
     dataDir: string;
     log?: (level: "info" | "warn" | "error", message: string) => void;
+    agentCommandResolver: AgentCommandResolver;
+    agentRunRecorder: AgentRunRecorder;
   }) {
     this.managedInstaller = new ManagedOpenClawInstaller(params.dataDir, params.log);
+    this.agentCommandResolver = params.agentCommandResolver;
+    this.agentRunRecorder = params.agentRunRecorder;
   }
 
   async prepare(inputSettings: RuntimeReplyInput["settings"]): Promise<void> {
@@ -79,7 +87,7 @@ export class OpenClawCliRuntimeAdapter implements RuntimeAdapter {
       const env = this.buildEnv(input.settings, command);
 
       const timeoutMs = Math.max(10_000, runtime.openclawTimeoutSeconds * 1000 + 30_000);
-      const reply = await this.invokeOpenClaw(command, args, cwd, env, timeoutMs);
+      const reply = await this.invokeOpenClaw(command, args, cwd, env, timeoutMs, input);
 
       if (!reply) {
         throw new Error("OpenClaw 未返回可发送的文本内容");
@@ -151,10 +159,22 @@ export class OpenClawCliRuntimeAdapter implements RuntimeAdapter {
     args: string[],
     cwd: string,
     env: NodeJS.ProcessEnv,
-    timeoutMs: number
+    timeoutMs: number,
+    input: RuntimeReplyInput
   ): Promise<string> {
     let stdout = "";
     let stderr = "";
+    const runId = this.agentRunRecorder.start({
+      title: input.contact.id === "__ui_console__" ? "UI 手动指令 / OpenClaw CLI" : "微信自动回复 / OpenClaw CLI",
+      agentId: input.settings.assistantRuntime.openclawAgentId.trim() || "main",
+      runtimeKind: input.settings.assistantRuntime.kind,
+      source: input.contact.id === "__ui_console__" ? "ui-manual" : "wechat-auto",
+      contactId: input.contact.id === "__ui_console__" ? null : input.contact.id,
+      command,
+      args,
+      cwd,
+      prompt: input.incomingText
+    });
     try {
       const result = await execFileAsync(command, args, {
         cwd,
@@ -166,18 +186,56 @@ export class OpenClawCliRuntimeAdapter implements RuntimeAdapter {
       stderr = result.stderr ?? "";
     } catch (error) {
       const message = extractProcessError(error);
+      this.agentRunRecorder.finish(runId, {
+        status: "error",
+        finishedAt: new Date().toISOString(),
+        exitCode: readProcessExitCode(error),
+        stdout: (error as { stdout?: string }).stdout ?? stdout,
+        stderr: (error as { stderr?: string }).stderr ?? stderr,
+        errorMessage: message
+      });
       if (message.includes("ENOENT")) {
         throw new Error(`未检测到 OpenClaw 命令：${command}`);
       }
       throw new Error(`OpenClaw CLI 执行失败：${message}`);
     }
 
-    const payload = parseOpenClawJson(stdout, stderr);
-    const reply = formatOpenClawReply(payload);
-    if (!reply) {
-      throw new Error(payload.summary?.trim() || "OpenClaw 未返回可发送的文本内容");
+    try {
+      const payload = parseOpenClawJson(stdout, stderr);
+      const reply = formatOpenClawReply(payload);
+      if (!reply) {
+        this.agentRunRecorder.finish(runId, {
+          status: "error",
+          finishedAt: new Date().toISOString(),
+          exitCode: 0,
+          stdout,
+          stderr,
+          errorMessage: payload.summary?.trim() || "OpenClaw 未返回可发送的文本内容"
+        });
+        throw new Error(payload.summary?.trim() || "OpenClaw 未返回可发送的文本内容");
+      }
+      this.agentRunRecorder.finish(runId, {
+        status: "success",
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+        stdout,
+        stderr,
+        finalOutput: reply,
+        errorMessage: null
+      });
+      return reply;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.agentRunRecorder.finish(runId, {
+        status: "error",
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+        stdout,
+        stderr,
+        errorMessage: message
+      });
+      throw error;
     }
-    return reply;
   }
 
   private async invokeManagedGateway(input: RuntimeReplyInput): Promise<string> {
@@ -189,6 +247,17 @@ export class OpenClawCliRuntimeAdapter implements RuntimeAdapter {
     const timeout = setTimeout(() => {
       controller.abort();
     }, timeoutMs);
+    const runId = this.agentRunRecorder.start({
+      title: input.contact.id === "__ui_console__" ? "UI 手动指令 / OpenClaw Gateway" : "微信自动回复 / OpenClaw Gateway",
+      agentId,
+      runtimeKind: input.settings.assistantRuntime.kind,
+      source: input.contact.id === "__ui_console__" ? "ui-manual" : "wechat-auto",
+      contactId: input.contact.id === "__ui_console__" ? null : input.contact.id,
+      command: "openclaw-gateway-http",
+      args: ["POST", "/v1/chat/completions"],
+      cwd: runtime.openclawWorkingDir.trim() || process.cwd(),
+      prompt: input.incomingText
+    });
 
     try {
       const response = await fetch(`${gateway.origin}/v1/chat/completions`, {
@@ -219,18 +288,59 @@ export class OpenClawCliRuntimeAdapter implements RuntimeAdapter {
         const errorMessage = payload?.error?.message?.trim()
           || raw.trim()
           || `Gateway HTTP ${response.status}`;
+        this.agentRunRecorder.finish(runId, {
+          status: "error",
+          finishedAt: new Date().toISOString(),
+          exitCode: response.status,
+          stdout: raw,
+          stderr: "",
+          errorMessage
+        });
         throw new Error(`OpenClaw Gateway 调用失败：${errorMessage}`);
       }
 
       const reply = extractGatewayReplyText(payload);
       if (!reply) {
+        this.agentRunRecorder.finish(runId, {
+          status: "error",
+          finishedAt: new Date().toISOString(),
+          exitCode: response.status,
+          stdout: raw,
+          stderr: "",
+          errorMessage: "OpenClaw Gateway 未返回可发送的文本内容"
+        });
         throw new Error("OpenClaw Gateway 未返回可发送的文本内容");
       }
+      this.agentRunRecorder.finish(runId, {
+        status: "success",
+        finishedAt: new Date().toISOString(),
+        exitCode: response.status,
+        stdout: raw,
+        stderr: "",
+        finalOutput: reply,
+        errorMessage: null
+      });
       return reply;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
+        this.agentRunRecorder.finish(runId, {
+          status: "error",
+          finishedAt: new Date().toISOString(),
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          errorMessage: "OpenClaw Gateway 请求超时"
+        });
         throw new Error("OpenClaw Gateway 请求超时");
       }
+      this.agentRunRecorder.finish(runId, {
+        status: "error",
+        finishedAt: new Date().toISOString(),
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        errorMessage: error instanceof Error ? error.message : String(error)
+      });
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -288,6 +398,14 @@ function extractProcessError(error: unknown): string {
     return details.trim();
   }
   return String(error);
+}
+
+function readProcessExitCode(error: unknown): number | null {
+  if (error && typeof error === "object") {
+    const candidate = error as { code?: string | number };
+    return typeof candidate.code === "number" ? candidate.code : null;
+  }
+  return null;
 }
 
 function parseOpenClawJson(stdout: string, stderr: string): OpenClawCliResponse {

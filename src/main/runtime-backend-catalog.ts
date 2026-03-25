@@ -29,7 +29,6 @@ const ASSISTANT_RUNTIME_DEFINITIONS: Record<AssistantRuntimeKind, AssistantRunti
 
 export function listAssistantRuntimeOptions(): AssistantRuntimeOptionSnapshot[] {
   return Object.values(ASSISTANT_RUNTIME_DEFINITIONS)
-    .filter((item) => item.kind !== "openclaw-acp")
     .map((item) => ({
     kind: item.kind,
     label: item.label,

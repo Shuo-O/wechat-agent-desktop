@@ -1,4 +1,5 @@
 export type LogLevel = "info" | "warn" | "error";
+export type AgentRunStatus = "running" | "success" | "error";
 export type ProviderKind =
   | "mock"
   | "deepseek"
@@ -78,6 +79,55 @@ export interface LogEntry {
   createdAt: string;
 }
 
+export interface AgentCatalogEntry {
+  id: string;
+  label: string;
+  command: string;
+  resolvedPath: string | null;
+  detected: boolean;
+  source: "configured" | "process-path" | "login-shell" | "common-dir" | "missing";
+  checkedAt: string;
+  details: string | null;
+}
+
+export interface AgentRunEntry {
+  id: string;
+  title: string;
+  agentId: string;
+  runtimeKind: AssistantRuntimeKind;
+  source: "wechat-auto" | "ui-manual";
+  contactId: string | null;
+  command: string;
+  args: string[];
+  cwd: string;
+  prompt: string;
+  stdout: string;
+  stderr: string;
+  finalOutput: string;
+  startedAt: string;
+  finishedAt: string | null;
+  exitCode: number | null;
+  status: AgentRunStatus;
+  errorMessage: string | null;
+}
+
+export interface AgentRunStartInput {
+  title: string;
+  agentId: string;
+  runtimeKind: AssistantRuntimeKind;
+  source: AgentRunEntry["source"];
+  contactId: string | null;
+  command: string;
+  args: string[];
+  cwd: string;
+  prompt: string;
+}
+
+export interface AgentRunRecorder {
+  start(input: AgentRunStartInput): string;
+  finish(runId: string, patch: Partial<Omit<AgentRunEntry, "id">>): void;
+}
+
 export interface ConversationTurn {
   role: "user" | "assistant";
   text: string;
@@ -116,6 +166,7 @@ export interface RuntimeState {
 export interface AppData {
   settings: AppSettings;
   logs: LogEntry[];
+  agentRuns: AgentRunEntry[];
   contacts: Record<string, ContactEntry>;
   wechat: WechatState;
   runtime: RuntimeState;
@@ -149,6 +200,8 @@ export interface Snapshot {
   runtimeOptions: AssistantRuntimeOptionSnapshot[];
   providerOptions: ProviderOptionSnapshot[];
   runtime: RuntimeState;
+  agentCatalog: AgentCatalogEntry[];
+  agentRuns: AgentRunEntry[];
   wechat: {
     status: WechatLoginStatus;
     qrUrl: string | null;
@@ -168,6 +221,14 @@ export interface Snapshot {
     lastError: string | null;
   }>;
   logs: LogEntry[];
+}
+
+export interface ManualInstructionResult {
+  reply: string;
+  runtimeKind: AssistantRuntimeKind;
+  agentId: string;
+  startedAt: string;
+  finishedAt: string;
 }
 
 export interface ProviderOptionSnapshot {

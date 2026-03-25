@@ -1,7 +1,10 @@
 const state = {
   snapshot: null,
   error: "",
-  formDraft: null
+  formDraft: null,
+  manualPrompt: "",
+  manualBusy: false,
+  manualResult: null
 };
 
 async function call(action, ...args) {
@@ -60,6 +63,49 @@ function contactStatusPill(status) {
   if (status === "error") return `<span class="status-pill error">异常</span>`;
   if (status === "muted") return `<span class="status-pill idle">已静音</span>`;
   return `<span class="status-pill ok">正常</span>`;
+}
+
+function agentDetectionPill(detected) {
+  return detected
+    ? `<span class="status-pill ok">已识别</span>`
+    : `<span class="status-pill idle">未识别</span>`;
+}
+
+function agentRunStatusPill(status) {
+  if (status === "success") return `<span class="status-pill ok">成功</span>`;
+  if (status === "error") return `<span class="status-pill error">失败</span>`;
+  return `<span class="status-pill warn">运行中</span>`;
+}
+
+function agentSourceLabel(source) {
+  if (source === "login-shell") return "登录 shell";
+  if (source === "process-path") return "当前 PATH";
+  if (source === "common-dir") return "常见目录";
+  if (source === "configured") return "显式路径";
+  return "未找到";
+}
+
+function manualSourceLabel(source) {
+  return source === "ui-manual" ? "UI 手动指令" : "微信自动回复";
+}
+
+function formatCommandLine(command, args) {
+  return [command, ...(args || [])].filter(Boolean).join(" ");
+}
+
+function isCurrentAgentMode(snapshot) {
+  return snapshot.settings.assistantRuntimeKind !== "local-provider"
+    || snapshot.settings.providerKind === "codex";
+}
+
+function currentAgentLabel(snapshot) {
+  if (snapshot.settings.assistantRuntimeKind === "openclaw-acp") {
+    return snapshot.settings.openclawAcpHarnessId || "codex";
+  }
+  if (snapshot.settings.assistantRuntimeKind === "openclaw-cli") {
+    return snapshot.settings.openclawAgentId || "main";
+  }
+  return snapshot.settings.providerKind === "codex" ? "codex" : snapshot.settings.providerKind;
 }
 
 function getChannelOption(snapshot, kind) {
@@ -284,6 +330,16 @@ function renderProviderOptions(snapshot, selectedKind, showCodexOption) {
     .join("");
 }
 
+function renderRuntimeOptions(snapshot, selectedKind, showAcpOption) {
+  return snapshot.runtimeOptions
+    .filter((item) => item.kind !== "openclaw-acp" || showAcpOption)
+    .map(
+      (item) =>
+        `<option value="${item.kind}" ${selectedKind === item.kind ? "selected" : ""}>${escapeHtml(item.label)}</option>`
+    )
+    .join("");
+}
+
 function render() {
   const root = document.getElementById("app");
   const snapshot = state.snapshot;
@@ -342,6 +398,86 @@ function render() {
         .join("")
     : `<div class="empty">还没有运行日志。</div>`;
 
+  const detectedAgentsCount = snapshot.agentCatalog.filter((item) => item.detected).length;
+  const agentCatalog = snapshot.agentCatalog.length
+    ? snapshot.agentCatalog
+        .map(
+          (item) => `
+        <article class="agent-card">
+          <header>
+            <div>
+              <h4>${escapeHtml(item.label)}</h4>
+              <div class="contact-meta">命令：${escapeHtml(item.command)}</div>
+            </div>
+            ${agentDetectionPill(item.detected)}
+          </header>
+          <div class="contact-preview"><strong>路径：</strong><br />${escapeHtml(item.resolvedPath || "未识别")}</div>
+          <div class="contact-preview"><strong>来源：</strong><br />${escapeHtml(agentSourceLabel(item.source))}${item.details ? ` · ${escapeHtml(item.details)}` : ""}</div>
+          <div class="contact-meta">最近检测：${formatTime(item.checkedAt)}</div>
+          <div class="contact-actions">
+            ${
+              item.id === "codex"
+                ? `<button class="btn btn-secondary" data-action="use-codex-mode">用作 Codex 直连</button>`
+                : ""
+            }
+            ${
+              item.id !== "openclaw"
+                ? `<button class="btn btn-muted" data-action="use-acp-agent" data-agent="${escapeHtml(item.id)}">设为 ACP Harness</button>`
+                : ""
+            }
+            ${
+              item.id === "openclaw" && item.resolvedPath
+                ? `<button class="btn btn-muted" data-action="use-openclaw-command" data-path="${escapeHtml(item.resolvedPath)}">写入 OpenClaw 命令</button>`
+                : ""
+            }
+          </div>
+        </article>
+      `
+        )
+        .join("")
+    : `<div class="empty">还没有 Agent 检测结果。</div>`;
+
+  const agentRuns = snapshot.agentRuns.length
+    ? snapshot.agentRuns
+        .map(
+          (item) => `
+        <article class="agent-run-item">
+          <header>
+            <div>
+              <strong>${escapeHtml(item.title)}</strong>
+              <div class="log-meta">${formatTime(item.startedAt)} · ${escapeHtml(item.agentId)} · ${escapeHtml(manualSourceLabel(item.source))}</div>
+            </div>
+            ${agentRunStatusPill(item.status)}
+          </header>
+          <div class="contact-preview"><strong>指令：</strong><br />${escapeHtml(item.prompt || "暂无")}</div>
+          <div class="contact-preview"><strong>命令：</strong><br />${escapeHtml(formatCommandLine(item.command, item.args))}</div>
+          <div class="contact-preview"><strong>工作目录：</strong><br />${escapeHtml(item.cwd || "暂无")}</div>
+          ${
+            item.finalOutput
+              ? `<div class="contact-preview"><strong>最终回复：</strong><br />${escapeHtml(item.finalOutput)}</div>`
+              : ""
+          }
+          ${
+            item.errorMessage
+              ? `<div class="contact-preview"><strong>异常：</strong><br />${escapeHtml(item.errorMessage)}</div>`
+              : ""
+          }
+          <details class="run-details">
+            <summary>展开 stdout / stderr / 元数据</summary>
+            <div class="run-meta"><strong>结束时间：</strong> ${escapeHtml(formatTime(item.finishedAt))}</div>
+            <div class="run-meta"><strong>退出码：</strong> ${escapeHtml(item.exitCode == null ? "暂无" : String(item.exitCode))}</div>
+            <div class="run-meta"><strong>联系人：</strong> ${escapeHtml(item.contactId || "UI 手动")}</div>
+            <div class="run-meta"><strong>stdout</strong></div>
+            <pre class="code-block">${escapeHtml(item.stdout || "暂无")}</pre>
+            <div class="run-meta"><strong>stderr</strong></div>
+            <pre class="code-block">${escapeHtml(item.stderr || "暂无")}</pre>
+          </details>
+        </article>
+      `
+        )
+        .join("")
+    : `<div class="empty">还没有 Agent 执行日志。可以先在下方指令台发一条测试指令。</div>`;
+
   const settingsDraft = currentSettingsDraft(snapshot);
   const activeChannelOption = getChannelOption(snapshot, settingsDraft.channelBackendKind);
   const activeRuntimeOption = getRuntimeOption(snapshot, settingsDraft.assistantRuntimeKind);
@@ -357,6 +493,11 @@ function render() {
     settingsDraft.advancedModeEnabled
     || activeProviderKind === "codex"
     || snapshot.settings.providerKind === "codex";
+  const showAcpOption =
+    settingsDraft.advancedModeEnabled
+    || settingsDraft.assistantRuntimeKind === "openclaw-acp"
+    || snapshot.settings.assistantRuntimeKind === "openclaw-acp";
+  const manualConsoleEnabled = isCurrentAgentMode(snapshot);
 
   root.innerHTML = `
     <div class="shell">
@@ -385,6 +526,10 @@ function render() {
           <div class="stat-card">
             <div class="stat-label">${snapshot.settings.assistantRuntimeKind === "local-provider" ? "当前模型" : snapshot.settings.assistantRuntimeKind === "openclaw-acp" ? "当前 ACP" : "当前 Agent"}</div>
             <div class="stat-value">${escapeHtml(providerModelLabel(snapshot))}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">已识别 Agent</div>
+            <div class="stat-value">${escapeHtml(String(detectedAgentsCount))}</div>
           </div>
           ${
             snapshot.settings.assistantRuntimeKind === "local-provider"
@@ -451,6 +596,45 @@ function render() {
               </div>
             </section>
 
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h3>Agent 检测</h3>
+                  <p>自动识别本机可用的 Codex / ACP harness 命令，并展示解析到的真实路径。</p>
+                </div>
+                <button class="btn btn-secondary" type="button" data-action="refresh-agents">刷新检测</button>
+              </div>
+              <div class="agents">${agentCatalog}</div>
+            </section>
+
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h3>Agent 指令台</h3>
+                  <p>直接在 UI 里发送一条指令，走当前已保存的 Agent 链路。</p>
+                </div>
+                ${manualConsoleEnabled ? `<span class="status-pill ok">当前目标：${escapeHtml(currentAgentLabel(snapshot))}</span>` : `<span class="status-pill idle">当前不是 Agent 模式</span>`}
+              </div>
+              <div class="field">
+                <label for="manualPrompt">指令内容</label>
+                <textarea id="manualPrompt" placeholder="例如：请用中文总结当前仓库用途，并指出入口文件。">${escapeHtml(state.manualPrompt)}</textarea>
+              </div>
+              <div class="row">
+                <button class="btn btn-primary" type="button" data-action="run-manual" ${manualConsoleEnabled && !state.manualBusy ? "" : "disabled"}>${state.manualBusy ? "执行中…" : "发送指令"}</button>
+                <button class="btn btn-muted" type="button" data-action="clear-manual">清空输入</button>
+              </div>
+              ${
+                manualConsoleEnabled
+                  ? `<p class="subtle">当前走的是已保存配置：${escapeHtml(assistantRuntimeLabel(snapshot))} / ${escapeHtml(currentAgentLabel(snapshot))}。</p>`
+                  : `<p class="subtle">要直接调用本机 Agent，请先切到 <code>Codex（高级）</code> 或 <code>OpenClaw ACP</code> 并保存设置。</p>`
+              }
+              ${
+                state.manualResult
+                  ? `<div class="contact-preview"><strong>最近结果：</strong><br />${escapeHtml(state.manualResult.reply)}</div><div class="contact-meta">${formatTime(state.manualResult.finishedAt)} · ${escapeHtml(state.manualResult.agentId)}</div>`
+                  : ""
+              }
+            </section>
+
           </div>
 
           <div class="column">
@@ -495,12 +679,7 @@ function render() {
                 <div class="field">
                   <label for="assistantRuntimeKind">回复链路</label>
                   <select id="assistantRuntimeKind" name="assistantRuntimeKind">
-                    ${snapshot.runtimeOptions
-                      .map(
-                        (item) =>
-                          `<option value="${item.kind}" ${settingsDraft.assistantRuntimeKind === item.kind ? "selected" : ""}>${escapeHtml(item.label)}</option>`
-                      )
-                      .join("")}
+                    ${renderRuntimeOptions(snapshot, settingsDraft.assistantRuntimeKind, showAcpOption)}
                   </select>
                 </div>
                 <p class="subtle">${escapeHtml(assistantRuntimeModeHint(settingsDraft.assistantRuntimeKind))}</p>
@@ -638,6 +817,16 @@ function render() {
             <section class="card logs-card">
               <div class="card-head">
                 <div>
+                  <h3>Agent 执行日志</h3>
+                  <p>展示最近 ${snapshot.agentRuns.length} 次运行的命令、cwd、stdout、stderr 与最终回复。</p>
+                </div>
+              </div>
+              <div class="agent-runs">${agentRuns}</div>
+            </section>
+
+            <section class="card logs-card">
+              <div class="card-head">
+                <div>
                   <h3>运行日志</h3>
                   <p>仅展示最近 ${snapshot.logs.length} 条，支持滚动翻阅。</p>
                 </div>
@@ -673,6 +862,7 @@ function bindEvents() {
       if (action === "start-runtime") await call("startRuntime");
       if (action === "stop-runtime") await call("stopRuntime");
       if (action === "open-data") await call("openDataDirectory");
+      if (action === "refresh-agents") await call("refreshAgents");
       if (action === "toggle-contact") {
         const contactId = event.currentTarget.getAttribute("data-contact");
         const enabled = event.currentTarget.getAttribute("data-enabled") === "true";
@@ -695,6 +885,50 @@ function bindEvents() {
         if (selected) {
           syncDraftFromForm();
           state.formDraft.openclawWorkingDir = selected;
+          render();
+        }
+      }
+      if (action === "use-codex-mode") {
+        syncDraftFromForm();
+        state.formDraft.advancedModeEnabled = true;
+        state.formDraft.assistantRuntimeKind = "local-provider";
+        state.formDraft.providerKind = "codex";
+        render();
+      }
+      if (action === "use-acp-agent") {
+        syncDraftFromForm();
+        state.formDraft.advancedModeEnabled = true;
+        state.formDraft.assistantRuntimeKind = "openclaw-acp";
+        state.formDraft.openclawAcpHarnessId = event.currentTarget.getAttribute("data-agent") || "codex";
+        render();
+      }
+      if (action === "use-openclaw-command") {
+        syncDraftFromForm();
+        state.formDraft.openclawCommand = event.currentTarget.getAttribute("data-path") || state.formDraft.openclawCommand;
+        render();
+      }
+      if (action === "clear-manual") {
+        state.manualPrompt = "";
+        state.manualResult = null;
+        render();
+      }
+      if (action === "run-manual") {
+        const prompt = state.manualPrompt.trim();
+        if (!prompt) {
+          state.error = "请输入要发送给 Agent 的指令";
+          render();
+          return;
+        }
+        state.error = "";
+        state.manualBusy = true;
+        render();
+        try {
+          state.manualResult = await window.wechatAgent.runManualInstruction(prompt);
+          state.manualPrompt = "";
+        } catch (error) {
+          state.error = error?.message || String(error);
+        } finally {
+          state.manualBusy = false;
           render();
         }
       }
@@ -782,6 +1016,13 @@ function bindEvents() {
       syncDraftFromForm();
       state.formDraft.advancedModeEnabled = event.currentTarget.checked;
       render();
+    });
+  }
+
+  const manualPromptInput = document.getElementById("manualPrompt");
+  if (manualPromptInput) {
+    manualPromptInput.addEventListener("input", (event) => {
+      state.manualPrompt = event.currentTarget.value;
     });
   }
 }

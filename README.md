@@ -3,6 +3,7 @@
 `WeChat Agent Desktop` 是一个把微信扫码登录、消息轮询、联系人上下文和 AI 助手接入打包成桌面应用的实验性项目。它面向“不想自己搭协议层、也不想在命令行里折腾”的用户，让微信私聊接入助手这件事更接近开箱即用。
 
 本项目当前基于 OpenClaw / iLink 协议做微信接入，支持国内外热门 AI 供应商、自定义兼容接口和 Codex CLI 等多种回复来源。
+当前微信接入链路走的是 OpenClaw / iLink 暴露的 HTTP 接口，收消息使用长轮询，不是 WebSocket。
 
 ## 开源说明
 
@@ -148,6 +149,46 @@ wechat-agent-desktop/
 5. `SessionEngine` 根据当前 Provider 和协议适配器生成回复
 6. `WechatGateway` 把文本消息和 typing 状态回发给微信
 7. `JsonStore` 持久化设置、联系人、运行日志和登录态
+
+## 微信协议链路
+
+- 当前实现不是浏览器网页注入，也不是 WebSocket 常连
+- 桌面端通过 OpenClaw / iLink 的 HTTP API 完成扫码、轮询、发消息和 typing
+- 新消息接收方式是 `getupdates` 长轮询
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as 用户
+    participant App as Electron App
+    participant Gateway as WechatGateway
+    participant OC as OpenClaw / iLink HTTP
+    participant WX as WeChat
+    participant Session as SessionEngine
+    participant Runtime as Provider / Codex
+
+    User->>App: 点击开始扫码登录
+    App->>Gateway: beginLogin()
+    Gateway->>OC: GET /ilink/bot/get_bot_qrcode
+    OC-->>Gateway: qrcode + qrcode_img_content
+    Gateway-->>App: 返回二维码图片
+    User->>WX: 扫码并确认
+    Gateway->>OC: GET /ilink/bot/get_qrcode_status
+    OC-->>Gateway: bot_token / ilink_user_id / baseUrl
+    Gateway-->>App: 保存登录态
+
+    loop 长轮询收消息
+        Gateway->>OC: POST /ilink/bot/getupdates
+        OC-->>Gateway: msgs + cursor
+        Gateway->>Session: onInboundMessage()
+        Session->>Runtime: 生成回复
+        Runtime-->>Session: reply text
+        Session->>Gateway: sendTyping() / sendText()
+        Gateway->>OC: POST /ilink/bot/sendtyping
+        Gateway->>OC: POST /ilink/bot/sendmessage
+        OC-->>WX: 同步到微信会话
+    end
+```
 
 ## 核心模块
 

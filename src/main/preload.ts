@@ -12,6 +12,8 @@ const api = {
   clearContactHistory: (contactId: string) =>
     ipcRenderer.invoke("app:clearContactHistory", contactId),
   openDataDirectory: () => ipcRenderer.invoke("app:openDataDirectory"),
+  refreshAgents: () => ipcRenderer.invoke("app:refreshAgents"),
+  runManualInstruction: (prompt: string) => ipcRenderer.invoke("app:runManualInstruction", prompt),
   pickDirectory: () => ipcRenderer.invoke("app:pickDirectory"),
   onSnapshot: (listener: (snapshot: unknown) => void) => {
     const wrapped = (_event: unknown, snapshot: unknown) => listener(snapshot);
