@@ -5,6 +5,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import {
+  executeOpenAiToolCall,
+  OPENAI_COMPATIBLE_TOOLS,
+  type OpenAiToolCall
+} from "./assistant-tools";
+import {
   getProviderDefinition,
   getProviderLabel,
   isCloudProviderKind
@@ -17,6 +22,7 @@ import type {
 } from "./types";
 
 const execFileAsync = promisify(execFile);
+const MAX_OPENAI_TOOL_STEPS = 4;
 
 interface ProviderReplyInput {
   settings: ProviderSettings;
@@ -150,6 +156,93 @@ async function generateCodexReply({
 }
 
 async function generateOpenAiCompatibleReply({
+  settings,
+  contact,
+  incomingText
+}: ProviderReplyInput): Promise<string> {
+  const definition = getProviderDefinition(settings.kind);
+  const messages: Array<Record<string, unknown>> = buildOpenAiMessages(
+    settings.assistantPreset,
+    contact,
+    incomingText,
+    true
+  );
+
+  for (let step = 0; step < MAX_OPENAI_TOOL_STEPS; step += 1) {
+    const response = await fetch(
+      buildEndpointUrl(
+        settings.baseUrl,
+        definition.endpointPath ?? "/chat/completions"
+      ),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${settings.apiKey.trim()}`
+        },
+        body: JSON.stringify({
+          model: settings.model.trim(),
+          messages,
+          tools: OPENAI_COMPATIBLE_TOOLS,
+          tool_choice: "auto",
+          ...(shouldSendTemperature(settings.kind, settings.model) ? { temperature: 0.6 } : {})
+        })
+      }
+    );
+
+    const payload = (await safeReadJson(response)) as {
+      error?: { message?: string };
+      choices?: Array<{
+        message?: {
+          role?: string;
+          content?: string | Array<{ text?: string }> | null;
+          tool_calls?: OpenAiToolCall[];
+        };
+      }>;
+    };
+
+    if (!response.ok) {
+      const message = payload.error?.message || `${definition.label} 接口异常 (${response.status})`;
+      if (step === 0 && isToolUnsupportedError(message)) {
+        return generatePlainOpenAiCompatibleReply({
+          settings,
+          contact,
+          incomingText
+        });
+      }
+      throw new Error(message);
+    }
+
+    const message = payload.choices?.[0]?.message;
+    const toolCalls = message?.tool_calls ?? [];
+    const content = extractChatCompletionContent(message?.content);
+
+    if (!toolCalls.length) {
+      if (!content) {
+        throw new Error(`${definition.label} 返回了空内容`);
+      }
+      return formatForWechat(content);
+    }
+
+    messages.push({
+      role: "assistant",
+      content: content || "",
+      tool_calls: toolCalls
+    });
+
+    for (const toolCall of toolCalls) {
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id || toolCall.function?.name || "tool-call",
+        content: await executeOpenAiToolCall(toolCall)
+      });
+    }
+  }
+
+  throw new Error(`${definition.label} 工具调用轮次超限，未生成最终回复`);
+}
+
+async function generatePlainOpenAiCompatibleReply({
   settings,
   contact,
   incomingText
@@ -316,12 +409,13 @@ async function generateGeminiReply({
 function buildOpenAiMessages(
   preset: AssistantPresetId,
   contact: ContactEntry,
-  incomingText: string
+  incomingText: string,
+  allowTools = false
 ) {
   return [
     {
       role: "system",
-      content: presetPrompt(preset)
+      content: presetPrompt(preset, allowTools)
     },
     ...buildConversationMessages(contact, incomingText)
   ];
@@ -411,19 +505,22 @@ function rewriteSentence(input: string): string {
   return `你好，我已经看到你的信息了。关于“${cleaned}”，我先整理一下重点，稍后给你更完整的答复。`;
 }
 
-function presetPrompt(preset: AssistantPresetId): string {
+function presetPrompt(preset: AssistantPresetId, allowTools = false): string {
   const common =
     "你是一个运行在微信私聊里的中文助手。回复要简洁、自然、像真人发微信，不要使用复杂 Markdown，不要输出代码块，优先给出可直接发送的文本。";
+  const toolHint = allowTools
+    ? " 如果用户问题依赖最新信息、实时状态、网页内容或相对时间，必须优先调用可用工具，不要假装自己已经知道。使用搜索工具时，按用户输入语言或目标地区选择合适的 market/language；不确定时不要硬编码到单一国家。搜索结果摘要通常只用于定位来源；如果用户要你直接查看、直接告诉结果、总结事实，或者搜索摘要里没有明确事实，就继续调用 fetch_url 打开最相关页面，再基于页面内容作答，不要只丢链接。"
+    : "";
 
   switch (preset) {
     case "writer":
-      return `${common} 你的职责是润色、改写、提炼语气，让文字更适合微信发送。`;
+      return `${common}${toolHint} 你的职责是润色、改写、提炼语气，让文字更适合微信发送。`;
     case "work":
-      return `${common} 你的职责是工作沟通、总结重点、给出下一步行动建议。`;
+      return `${common}${toolHint} 你的职责是工作沟通、总结重点、给出下一步行动建议。`;
     case "support":
-      return `${common} 你的职责是客服回复，礼貌、稳妥、清晰。`;
+      return `${common}${toolHint} 你的职责是客服回复，礼貌、稳妥、清晰。`;
     default:
-      return `${common} 你的职责是通用问答和聊天辅助。`;
+      return `${common}${toolHint} 你的职责是通用问答和聊天辅助。`;
   }
 }
 
@@ -494,6 +591,14 @@ function buildGeminiUrl(baseUrl: string, model: string, apiKey: string): string 
   return url.toString();
 }
 
+function isToolUnsupportedError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("tools")
+    || normalized.includes("tool_calls")
+    || normalized.includes("function calling")
+    || normalized.includes("tool_choice");
+}
+
 function shouldSendTemperature(
   kind: ProviderReplyInput["settings"]["kind"],
   model: string
@@ -502,7 +607,7 @@ function shouldSendTemperature(
 }
 
 function extractChatCompletionContent(
-  value: string | Array<{ text?: string }> | undefined
+  value: string | Array<{ text?: string }> | null | undefined
 ): string {
   if (typeof value === "string") {
     return value.trim();

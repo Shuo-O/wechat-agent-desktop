@@ -1,6 +1,6 @@
 import { getProviderLabel, isCloudProviderKind } from "./provider-catalog";
-import { generateReply } from "./agent-provider";
 import type { ChannelAdapter } from "./channel-adapter";
+import type { RuntimeAdapter } from "./runtime-adapter";
 import type { JsonStore } from "./store";
 import type { AppSettings, InboundMessage } from "./types";
 
@@ -9,6 +9,7 @@ const HISTORY_LIMIT = 16;
 export class SessionEngine {
   private readonly store: JsonStore;
   private readonly channelAdapter: ChannelAdapter;
+  private readonly runtimeAdapter: RuntimeAdapter;
   private readonly onChanged: () => void;
   private readonly log: (level: "info" | "warn" | "error", message: string) => void;
   private readonly queues = new Map<string, InboundMessage[]>();
@@ -17,11 +18,13 @@ export class SessionEngine {
   constructor(params: {
     store: JsonStore;
     channelAdapter: ChannelAdapter;
+    runtimeAdapter: RuntimeAdapter;
     onChanged: () => void;
     log: (level: "info" | "warn" | "error", message: string) => void;
   }) {
     this.store = params.store;
     this.channelAdapter = params.channelAdapter;
+    this.runtimeAdapter = params.runtimeAdapter;
     this.onChanged = params.onChanged;
     this.log = params.log;
   }
@@ -82,8 +85,8 @@ export class SessionEngine {
         try {
           await this.channelAdapter.sendTyping(contactId, current.contextToken).catch(() => undefined);
 
-          const reply = await generateReply({
-            settings: settings.provider,
+          const reply = await this.runtimeAdapter.generateReply({
+            settings,
             contact: this.store.getData().contacts[contactId],
             incomingText: current.text
           });
@@ -135,14 +138,32 @@ export class SessionEngine {
 
 function normalizeError(error: unknown, settings: AppSettings): string {
   if (error instanceof Error) {
-    if (settings.provider.kind === "codex" && error.message.includes("工作目录")) {
+    if (
+      settings.assistantRuntime.kind === "local-provider"
+      && settings.provider.kind === "codex"
+      && error.message.includes("工作目录")
+    ) {
       return "Codex 模式尚未选择工作目录";
     }
-    if (settings.provider.kind === "codex" && error.message.includes("登录")) {
+    if (
+      settings.assistantRuntime.kind === "local-provider"
+      && settings.provider.kind === "codex"
+      && error.message.includes("登录")
+    ) {
       return "Codex 尚未登录，请先在终端执行 codex login";
     }
-    if (isCloudProviderKind(settings.provider.kind) && error.message.includes("API Key")) {
+    if (
+      settings.assistantRuntime.kind === "local-provider"
+      && isCloudProviderKind(settings.provider.kind)
+      && error.message.includes("API Key")
+    ) {
       return `尚未填写 ${getProviderLabel(settings.provider.kind)} API Key`;
+    }
+    if (
+      (settings.assistantRuntime.kind === "openclaw-cli" || settings.assistantRuntime.kind === "openclaw-acp")
+      && error.message.includes("OpenClaw")
+    ) {
+      return error.message;
     }
     return error.message;
   }

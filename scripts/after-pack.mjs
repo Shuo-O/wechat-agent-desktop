@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { vendorOpenClaw } from "./vendor-openclaw.mjs";
+
 const execFileAsync = promisify(execFile);
 
 async function findAppBundle(appOutDir) {
@@ -20,6 +22,12 @@ export default async function afterPack(context) {
   }
 
   const appBundlePath = await findAppBundle(context.appOutDir);
+  const resourcesPath = path.join(appBundlePath, "Contents", "Resources");
+  const openclawPrefix = path.join(resourcesPath, "openclaw-managed");
+
+  console.log(`[afterPack] 内置 OpenClaw 到应用包：${openclawPrefix}`);
+  await vendorOpenClaw(openclawPrefix);
+
   console.log(`[afterPack] 对未签名 macOS 应用执行 deep ad-hoc 签名：${appBundlePath}`);
 
   await execFileAsync("codesign", [

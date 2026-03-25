@@ -16,6 +16,7 @@ export type ProviderKind =
   | "codex";
 export type CloudProviderKind = Exclude<ProviderKind, "mock" | "codex">;
 export type ChannelBackendKind = "openclaw-official" | "openclaw-compatible";
+export type AssistantRuntimeKind = "local-provider" | "openclaw-cli" | "openclaw-acp";
 export type AssistantPresetId = "general" | "writer" | "work" | "support";
 export type WechatLoginStatus =
   | "logged_out"
@@ -53,10 +54,20 @@ export interface ChannelBackendSettings {
   requestHeaders: Record<string, string>;
 }
 
+export interface AssistantRuntimeSettings {
+  kind: AssistantRuntimeKind;
+  openclawCommand: string;
+  openclawAgentId: string;
+  openclawAcpHarnessId: string;
+  openclawTimeoutSeconds: number;
+  openclawWorkingDir: string;
+}
+
 export interface AppSettings {
   allowUnknownContacts: boolean;
   advancedModeEnabled: boolean;
   channel: ChannelBackendSettings;
+  assistantRuntime: AssistantRuntimeSettings;
   provider: ProviderSettings;
 }
 
@@ -77,6 +88,7 @@ export interface ContactEntry {
   id: string;
   enabled: boolean;
   lastContextToken: string;
+  runtimeSessionNonce: number;
   status: "idle" | "processing" | "error" | "muted";
   lastInboundAt: string | null;
   lastReplyAt: string | null;
@@ -117,6 +129,12 @@ export interface Snapshot {
     channelBackendKind: ChannelBackendKind;
     channelBaseUrl: string;
     channelHeadersJson: string;
+    assistantRuntimeKind: AssistantRuntimeKind;
+    openclawCommand: string;
+    openclawAgentId: string;
+    openclawAcpHarnessId: string;
+    openclawTimeoutSeconds: number;
+    openclawWorkingDir: string;
     providerKind: ProviderKind;
     assistantPreset: AssistantPresetId;
     providerBaseUrl: string;
@@ -128,6 +146,7 @@ export interface Snapshot {
     codexSandbox: CodexSandboxMode;
   };
   channelOptions: ChannelBackendOptionSnapshot[];
+  runtimeOptions: AssistantRuntimeOptionSnapshot[];
   providerOptions: ProviderOptionSnapshot[];
   runtime: RuntimeState;
   wechat: {
@@ -169,12 +188,24 @@ export interface ChannelBackendOptionSnapshot {
   defaultBaseUrl: string;
 }
 
+export interface AssistantRuntimeOptionSnapshot {
+  kind: AssistantRuntimeKind;
+  label: string;
+  description: string;
+}
+
 export interface SaveSettingsInput {
   allowUnknownContacts: boolean;
   advancedModeEnabled: boolean;
   channelBackendKind: ChannelBackendKind;
   channelBaseUrl: string;
   channelHeadersJson: string;
+  assistantRuntimeKind: AssistantRuntimeKind;
+  openclawCommand: string;
+  openclawAgentId: string;
+  openclawAcpHarnessId: string;
+  openclawTimeoutSeconds: number;
+  openclawWorkingDir: string;
   providerKind: ProviderKind;
   previousProviderKind?: ProviderKind;
   assistantPreset: AssistantPresetId;

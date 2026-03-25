@@ -66,6 +66,10 @@ function getChannelOption(snapshot, kind) {
   return snapshot.channelOptions.find((item) => item.kind === kind) || null;
 }
 
+function getRuntimeOption(snapshot, kind) {
+  return snapshot.runtimeOptions.find((item) => item.kind === kind) || null;
+}
+
 function getProviderOption(snapshot, kind) {
   return snapshot.providerOptions.find((item) => item.kind === kind) || null;
 }
@@ -78,11 +82,33 @@ function providerVendorLabel(snapshot) {
   return getProviderOption(snapshot, snapshot.settings.providerKind)?.label || "未知供应商";
 }
 
+function assistantRuntimeLabel(snapshot) {
+  return getRuntimeOption(snapshot, snapshot.settings.assistantRuntimeKind)?.label || "未知运行时";
+}
+
+function assistantRuntimeModeHint(kind) {
+  if (kind === "openclaw-acp") {
+    return "当前由 OpenClaw Gateway 接管回复，并把实际执行交给 ACP harness。浏览、工具、会话和运行时状态都以 OpenClaw 为准。";
+  }
+  if (kind === "openclaw-cli") {
+    return "当前由 OpenClaw 统一处理回复，本项目里的 DeepSeek / OpenAI 等直连配置不会参与实际回复。";
+  }
+  return "当前由本项目直接调用所选模型接口，回复不会经过 OpenClaw runtime。";
+}
+
 function channelBackendLabel(snapshot) {
   return getChannelOption(snapshot, snapshot.settings.channelBackendKind)?.label || "未知后端";
 }
 
 function providerModelLabel(snapshot) {
+  if (snapshot.settings.assistantRuntimeKind === "openclaw-acp") {
+    const harness = snapshot.settings.openclawAcpHarnessId || "codex";
+    const runtimeAgent = snapshot.settings.openclawAgentId || "main";
+    return `${harness} @ ${runtimeAgent}`;
+  }
+  if (snapshot.settings.assistantRuntimeKind === "openclaw-cli") {
+    return snapshot.settings.openclawAgentId || "默认 agent";
+  }
   if (snapshot.settings.providerKind === "mock") {
     return "内置回复";
   }
@@ -104,6 +130,12 @@ function buildDraftFromSnapshot(snapshot) {
     channelBackendKind: snapshot.settings.channelBackendKind,
     channelBaseUrl: snapshot.settings.channelBaseUrl,
     channelHeadersJson: snapshot.settings.channelHeadersJson,
+    assistantRuntimeKind: snapshot.settings.assistantRuntimeKind,
+    openclawCommand: snapshot.settings.openclawCommand,
+    openclawAgentId: snapshot.settings.openclawAgentId,
+    openclawAcpHarnessId: snapshot.settings.openclawAcpHarnessId,
+    openclawTimeoutSeconds: String(snapshot.settings.openclawTimeoutSeconds),
+    openclawWorkingDir: snapshot.settings.openclawWorkingDir,
     providerKind: snapshot.settings.providerKind,
     assistantPreset: snapshot.settings.assistantPreset,
     providerBaseUrl: snapshot.settings.providerBaseUrl,
@@ -142,6 +174,12 @@ function syncDraftFromForm() {
     channelBackendKind: formData.get("channelBackendKind") || snapshot.settings.channelBackendKind,
     channelBaseUrl: formData.get("channelBaseUrl") || "",
     channelHeadersJson: formData.get("channelHeadersJson") || "",
+    assistantRuntimeKind: formData.get("assistantRuntimeKind") || snapshot.settings.assistantRuntimeKind,
+    openclawCommand: formData.get("openclawCommand") || "",
+    openclawAgentId: formData.get("openclawAgentId") || "",
+    openclawAcpHarnessId: formData.get("openclawAcpHarnessId") || "",
+    openclawTimeoutSeconds: formData.get("openclawTimeoutSeconds") || String(snapshot.settings.openclawTimeoutSeconds),
+    openclawWorkingDir: formData.get("openclawWorkingDir") || "",
     providerKind: formData.get("providerKind") || snapshot.settings.providerKind,
     assistantPreset: formData.get("assistantPreset") || snapshot.settings.assistantPreset,
     providerBaseUrl: formData.get("providerBaseUrl") || "",
@@ -157,6 +195,26 @@ function syncDraftFromForm() {
   };
 
   return state.formDraft;
+}
+
+function applyRuntimeDefaults(kind) {
+  const snapshot = state.snapshot;
+  if (!snapshot) return;
+
+  const option = getRuntimeOption(snapshot, kind);
+  if (!option) return;
+
+  const draft = currentSettingsDraft(snapshot);
+  draft.assistantRuntimeKind = kind;
+  if (!draft.openclawCommand.trim()) {
+    draft.openclawCommand = snapshot.settings.openclawCommand || "openclaw";
+  }
+  if (!draft.openclawAcpHarnessId.trim()) {
+    draft.openclawAcpHarnessId = snapshot.settings.openclawAcpHarnessId || "codex";
+  }
+  if (!draft.openclawTimeoutSeconds.trim()) {
+    draft.openclawTimeoutSeconds = String(snapshot.settings.openclawTimeoutSeconds || 600);
+  }
 }
 
 function applyChannelDefaults(kind) {
@@ -286,8 +344,13 @@ function render() {
 
   const settingsDraft = currentSettingsDraft(snapshot);
   const activeChannelOption = getChannelOption(snapshot, settingsDraft.channelBackendKind);
+  const activeRuntimeOption = getRuntimeOption(snapshot, settingsDraft.assistantRuntimeKind);
   const activeProviderKind = settingsDraft.providerKind;
   const activeProviderOption = getProviderOption(snapshot, activeProviderKind);
+  const showOpenClawRuntimeFields = settingsDraft.assistantRuntimeKind === "openclaw-cli" || settingsDraft.assistantRuntimeKind === "openclaw-acp";
+  const showOpenClawCliFields = settingsDraft.assistantRuntimeKind === "openclaw-cli";
+  const showOpenClawAcpFields = settingsDraft.assistantRuntimeKind === "openclaw-acp";
+  const showLocalProviderSettings = settingsDraft.assistantRuntimeKind === "local-provider";
   const showCloudFields = isCloudProvider(snapshot, activeProviderKind);
   const showCodexFields = activeProviderKind === "codex";
   const showCodexOption =
@@ -312,17 +375,25 @@ function render() {
             <div class="stat-value">${wechatPill(snapshot)}</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">当前供应商</div>
-            <div class="stat-value">${escapeHtml(providerVendorLabel(snapshot))}</div>
+            <div class="stat-label">回复模式</div>
+            <div class="stat-value">${escapeHtml(assistantRuntimeLabel(snapshot))}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">微信后端</div>
             <div class="stat-value">${escapeHtml(channelBackendLabel(snapshot))}</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">当前模型</div>
+            <div class="stat-label">${snapshot.settings.assistantRuntimeKind === "local-provider" ? "当前模型" : snapshot.settings.assistantRuntimeKind === "openclaw-acp" ? "当前 ACP" : "当前 Agent"}</div>
             <div class="stat-value">${escapeHtml(providerModelLabel(snapshot))}</div>
           </div>
+          ${
+            snapshot.settings.assistantRuntimeKind === "local-provider"
+              ? `<div class="stat-card">
+            <div class="stat-label">当前供应商</div>
+            <div class="stat-value">${escapeHtml(providerVendorLabel(snapshot))}</div>
+          </div>`
+              : ""
+          }
         </div>
       </aside>
       <main class="main">
@@ -413,7 +484,63 @@ function render() {
 
                 <div class="card-head" style="margin-top:18px;">
                   <div>
-                    <h3>助手设置</h3>
+                  <h3>回复模式</h3>
+                    ${
+                      activeRuntimeOption
+                        ? `<p>${escapeHtml(activeRuntimeOption.description)}</p>`
+                        : ""
+                    }
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="assistantRuntimeKind">回复链路</label>
+                  <select id="assistantRuntimeKind" name="assistantRuntimeKind">
+                    ${snapshot.runtimeOptions
+                      .map(
+                        (item) =>
+                          `<option value="${item.kind}" ${settingsDraft.assistantRuntimeKind === item.kind ? "selected" : ""}>${escapeHtml(item.label)}</option>`
+                      )
+                      .join("")}
+                  </select>
+                </div>
+                <p class="subtle">${escapeHtml(assistantRuntimeModeHint(settingsDraft.assistantRuntimeKind))}</p>
+
+                <div class="field" style="${showOpenClawRuntimeFields ? "" : "display:none;"}">
+                  <label for="openclawCommand">OpenClaw 命令</label>
+                  <input id="openclawCommand" name="openclawCommand" value="${escapeHtml(settingsDraft.openclawCommand)}" placeholder="留空或保持默认表示由应用托管安装" />
+                </div>
+                <div class="field" style="${showOpenClawRuntimeFields ? "" : "display:none;"}">
+                  <label for="openclawAgentId">OpenClaw Agent ID</label>
+                  <input id="openclawAgentId" name="openclawAgentId" value="${escapeHtml(settingsDraft.openclawAgentId)}" placeholder="${showOpenClawAcpFields ? "留空使用 main" : "留空使用默认 agent"}" />
+                </div>
+                <div class="field" style="${showOpenClawAcpFields ? "" : "display:none;"}">
+                  <label for="openclawAcpHarnessId">ACP Harness ID</label>
+                  <input id="openclawAcpHarnessId" name="openclawAcpHarnessId" value="${escapeHtml(settingsDraft.openclawAcpHarnessId)}" placeholder="例如 codex / claude / gemini / opencode" />
+                </div>
+                <div class="field" style="${showOpenClawRuntimeFields ? "" : "display:none;"}">
+                  <label for="openclawTimeoutSeconds">OpenClaw 超时（秒）</label>
+                  <input id="openclawTimeoutSeconds" name="openclawTimeoutSeconds" type="number" min="0" step="1" value="${escapeHtml(settingsDraft.openclawTimeoutSeconds)}" />
+                </div>
+                <div class="field" style="${showOpenClawRuntimeFields ? "" : "display:none;"}">
+                  <label for="openclawWorkingDir">OpenClaw 工作目录（可留空）</label>
+                  <input id="openclawWorkingDir" name="openclawWorkingDir" value="${escapeHtml(settingsDraft.openclawWorkingDir)}" placeholder="留空表示应用当前目录" />
+                </div>
+                <div class="row" style="${showOpenClawRuntimeFields ? "margin-top:-4px;margin-bottom:10px;" : "display:none;"}">
+                  <button class="btn btn-secondary" type="button" data-action="pick-openclaw-dir">选择目录</button>
+                </div>
+                ${
+                  showOpenClawRuntimeFields
+                    ? `<p class="subtle">${
+                      showOpenClawAcpFields
+                        ? "该模式会把每条消息交给 <code>openclaw agent --json</code>，再由 OpenClaw 目标 agent 的 ACP runtime 接管。应用会自动启用 bundled OpenClaw 的 acpx backend；真正执行依赖所选 harness（例如 <code>codex</code>）在当前环境可用。"
+                        : "该模式会把每条消息交给 <code>openclaw agent --json</code> 处理。应用会优先使用包内 OpenClaw；如果当前环境没有内置版本，则自动托管安装。是否使用 DeepSeek 由 OpenClaw 自己的 agent 配置决定，不再读取下方直连模型设置。"
+                    }</p>`
+                    : ""
+                }
+
+                <div class="card-head" style="margin-top:18px;${showLocalProviderSettings ? "" : "display:none;"}">
+                  <div>
+                    <h3>直连模型设置</h3>
                     ${
                       activeProviderOption
                         ? `<p>${escapeHtml(activeProviderOption.description)}</p>`
@@ -421,19 +548,19 @@ function render() {
                     }
                   </div>
                 </div>
-                <div class="field">
-                  <label for="providerKind">助手模式</label>
+                <div class="field" style="${showLocalProviderSettings ? "" : "display:none;"}">
+                  <label for="providerKind">模型供应商</label>
                   <select id="providerKind" name="providerKind">
                     ${renderProviderOptions(snapshot, settingsDraft.providerKind, showCodexOption)}
                   </select>
                 </div>
-                <div class="switch-row">
+                <div class="switch-row" style="${showLocalProviderSettings ? "" : "display:none;"}">
                   <div>
                     <strong>显示高级助手</strong>
                   </div>
                   <input id="advancedModeEnabled" name="advancedModeEnabled" type="checkbox" ${settingsDraft.advancedModeEnabled ? "checked" : ""} />
                 </div>
-                <div class="field">
+                <div class="field" style="${showLocalProviderSettings ? "" : "display:none;"}">
                   <label for="assistantPreset">助手风格</label>
                   <select id="assistantPreset" name="assistantPreset">
                     ${presetOptions(settingsDraft.assistantPreset)}
@@ -441,7 +568,7 @@ function render() {
                 </div>
 
                 ${
-                  showCloudFields
+                  showLocalProviderSettings && showCloudFields
                     ? `
                     <div class="field">
                       <label for="providerBaseUrl">Base URL</label>
@@ -472,18 +599,18 @@ function render() {
                     : ""
                 }
 
-                <div class="field" style="${showCodexFields ? "" : "display:none;"}">
+                <div class="field" style="${showLocalProviderSettings && showCodexFields ? "" : "display:none;"}">
                   <label for="codexWorkdir">Codex 工作目录</label>
                   <input id="codexWorkdir" name="codexWorkdir" value="${escapeHtml(settingsDraft.codexWorkdir)}" placeholder="/path/to/project" />
                 </div>
-                <div class="row" style="${showCodexFields ? "margin-top:-4px;margin-bottom:10px;" : "display:none;"}">
+                <div class="row" style="${showLocalProviderSettings && showCodexFields ? "margin-top:-4px;margin-bottom:10px;" : "display:none;"}">
                   <button class="btn btn-secondary" type="button" data-action="pick-codex-dir">选择目录</button>
                 </div>
-                <div class="field" style="${showCodexFields ? "" : "display:none;"}">
+                <div class="field" style="${showLocalProviderSettings && showCodexFields ? "" : "display:none;"}">
                   <label for="codexModel">Codex 模型（可留空）</label>
                   <input id="codexModel" name="codexModel" value="${escapeHtml(settingsDraft.codexModel)}" placeholder="例如 gpt-5-codex" />
                 </div>
-                <div class="field" style="${showCodexFields ? "" : "display:none;"}">
+                <div class="field" style="${showLocalProviderSettings && showCodexFields ? "" : "display:none;"}">
                   <label for="codexSandbox">Codex 权限模式</label>
                   <select id="codexSandbox" name="codexSandbox">
                     <option value="read-only" ${settingsDraft.codexSandbox === "read-only" ? "selected" : ""}>只读问答</option>
@@ -563,6 +690,14 @@ function bindEvents() {
           render();
         }
       }
+      if (action === "pick-openclaw-dir") {
+        const selected = await window.wechatAgent.pickDirectory();
+        if (selected) {
+          syncDraftFromForm();
+          state.formDraft.openclawWorkingDir = selected;
+          render();
+        }
+      }
     });
   });
 
@@ -582,6 +717,12 @@ function bindEvents() {
         channelBackendKind: draft.channelBackendKind,
         channelBaseUrl: draft.channelBaseUrl,
         channelHeadersJson: draft.channelHeadersJson,
+        assistantRuntimeKind: draft.assistantRuntimeKind,
+        openclawCommand: draft.openclawCommand,
+        openclawAgentId: draft.openclawAgentId,
+        openclawAcpHarnessId: draft.openclawAcpHarnessId,
+        openclawTimeoutSeconds: Number(draft.openclawTimeoutSeconds || 0),
+        openclawWorkingDir: draft.openclawWorkingDir,
         providerKind: draft.providerKind,
         previousProviderKind: state.snapshot.settings.providerKind,
         assistantPreset: draft.assistantPreset,
@@ -599,6 +740,7 @@ function bindEvents() {
         state.formDraft = {
           ...draft,
           channelHeadersJson: draft.channelHeadersJson || "{}",
+          openclawTimeoutSeconds: draft.openclawTimeoutSeconds || "600",
           providerApiKey: "",
           resetHistories: false
         };
@@ -612,6 +754,15 @@ function bindEvents() {
     channelSelect.addEventListener("change", (event) => {
       syncDraftFromForm();
       applyChannelDefaults(event.currentTarget.value);
+      render();
+    });
+  }
+
+  const runtimeSelect = document.getElementById("assistantRuntimeKind");
+  if (runtimeSelect) {
+    runtimeSelect.addEventListener("change", (event) => {
+      syncDraftFromForm();
+      applyRuntimeDefaults(event.currentTarget.value);
       render();
     });
   }

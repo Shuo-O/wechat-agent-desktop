@@ -13,8 +13,8 @@ export function registerIpc(service: AppService): void {
     await service.startRuntime();
   });
   ipcMain.handle("app:stopRuntime", () => service.stopRuntime());
-  ipcMain.handle("app:saveSettings", (_event, input: SaveSettingsInput) => {
-    service.saveSettings(input);
+  ipcMain.handle("app:saveSettings", async (_event, input: SaveSettingsInput) => {
+    await service.saveSettings(input);
   });
   ipcMain.handle("app:setContactEnabled", (_event, contactId: string, enabled: boolean) => {
     service.setContactEnabled(contactId, enabled);

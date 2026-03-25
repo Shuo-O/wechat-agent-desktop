@@ -7,11 +7,17 @@ import {
   isChannelBackendKind
 } from "./channel-backend-catalog";
 import {
+  getAssistantRuntimeDefinition,
+  isAssistantRuntimeKind
+} from "./runtime-backend-catalog";
+import {
   getProviderDefinition,
   isProviderKind,
   resolveProviderApiStyle
 } from "./provider-catalog";
 import type {
+  AssistantRuntimeKind,
+  AssistantRuntimeSettings,
   AppData,
   AppSettings,
   AssistantPresetId,
@@ -55,11 +61,25 @@ function defaultProviderSettings(): ProviderSettings {
   };
 }
 
+function defaultAssistantRuntimeSettings(): AssistantRuntimeSettings {
+  const runtime = getAssistantRuntimeDefinition("local-provider");
+
+  return {
+    kind: runtime.kind,
+    openclawCommand: "openclaw",
+    openclawAgentId: "",
+    openclawAcpHarnessId: "codex",
+    openclawTimeoutSeconds: 600,
+    openclawWorkingDir: ""
+  };
+}
+
 function defaultSettings(): AppSettings {
   return {
     allowUnknownContacts: true,
     advancedModeEnabled: false,
     channel: defaultChannelSettings(),
+    assistantRuntime: defaultAssistantRuntimeSettings(),
     provider: defaultProviderSettings()
   };
 }
@@ -120,6 +140,7 @@ export class JsonStore {
       id: contactId,
       enabled,
       lastContextToken: "",
+      runtimeSessionNonce: 0,
       status: enabled ? "idle" : "muted",
       lastInboundAt: null,
       lastReplyAt: null,
@@ -162,6 +183,7 @@ export class JsonStore {
           ...defaultSettings(),
           ...(parsed.settings ?? {}),
           channel: normalizeChannelSettings(parsed.settings?.channel, parsed.wechat?.credentials?.baseUrl),
+          assistantRuntime: normalizeAssistantRuntimeSettings(parsed.settings?.assistantRuntime),
           provider: normalizeProviderSettings(parsed.settings?.provider)
         },
         wechat: {
@@ -183,6 +205,7 @@ export class JsonStore {
   private normalize(): void {
     for (const contact of Object.values(this.data.contacts)) {
       contact.history = contact.history.slice(-MAX_HISTORY);
+      contact.runtimeSessionNonce = readNonNegativeInteger(contact.runtimeSessionNonce, 0);
       if (!contact.enabled && contact.status !== "processing") {
         contact.status = "muted";
       }
@@ -233,6 +256,24 @@ function normalizeProviderSettings(raw: unknown): ProviderSettings {
   };
 }
 
+function normalizeAssistantRuntimeSettings(raw: unknown): AssistantRuntimeSettings {
+  const defaults = defaultAssistantRuntimeSettings();
+  const candidate = (raw ?? {}) as Partial<AssistantRuntimeSettings> & Record<string, unknown>;
+  const kind = readAssistantRuntimeKind(candidate.kind);
+
+  return {
+    kind,
+    openclawCommand: readString(candidate.openclawCommand) || defaults.openclawCommand,
+    openclawAgentId: readString(candidate.openclawAgentId),
+    openclawAcpHarnessId: readString(candidate.openclawAcpHarnessId) || defaults.openclawAcpHarnessId,
+    openclawTimeoutSeconds: readNonNegativeInteger(
+      candidate.openclawTimeoutSeconds,
+      defaults.openclawTimeoutSeconds
+    ),
+    openclawWorkingDir: readString(candidate.openclawWorkingDir)
+  };
+}
+
 function readChannelBackendKind(
   value: unknown,
   fallbackCredentialBaseUrl?: string
@@ -264,6 +305,16 @@ function readChannelBaseUrl(
     return fallbackCredentialBaseUrl;
   }
   return fallback;
+}
+
+function readAssistantRuntimeKind(value: unknown): AssistantRuntimeKind {
+  if (value === "openclaw-acp") {
+    return "openclaw-cli";
+  }
+  if (isAssistantRuntimeKind(value)) {
+    return value;
+  }
+  return defaultAssistantRuntimeSettings().kind;
 }
 
 function readProviderKind(value: unknown): ProviderKind {
@@ -336,6 +387,14 @@ function readApiStyle(kind: ProviderKind, value: unknown): ProviderApiStyle {
 
 function readString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function readNonNegativeInteger(value: unknown, fallback: number): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return fallback;
+  }
+  return Math.floor(numeric);
 }
 
 function readRequestHeaders(value: unknown): Record<string, string> {

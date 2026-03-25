@@ -6,12 +6,18 @@ import {
   listChannelBackendOptions
 } from "./channel-backend-catalog";
 import {
+  getAssistantRuntimeDefinition,
+  listAssistantRuntimeOptions
+} from "./runtime-backend-catalog";
+import {
   getProviderDefinition,
   listProviderOptions,
   resolveProviderApiStyle
 } from "./provider-catalog";
 import type { ChannelAdapter } from "./channel-adapter";
 import { createChannelAdapter } from "./channel-adapter-factory";
+import type { RuntimeAdapter } from "./runtime-adapter";
+import { createRuntimeAdapter } from "./runtime-adapter-factory";
 import { JsonStore } from "./store";
 import type { SaveSettingsInput, Snapshot } from "./types";
 import { SessionEngine } from "./session-engine";
@@ -29,17 +35,24 @@ function maskApiKey(value: string): string {
 export class AppService extends EventEmitter {
   private readonly store: JsonStore;
   private readonly channelAdapter: ChannelAdapter;
+  private readonly runtimeAdapter: RuntimeAdapter;
   private readonly sessionEngine: SessionEngine;
   private readonly channelOptions = listChannelBackendOptions();
+  private readonly runtimeOptions = listAssistantRuntimeOptions();
   private readonly providerOptions = listProviderOptions();
 
   constructor(dataDir: string) {
     super();
     this.store = new JsonStore(dataDir);
     this.channelAdapter = createChannelAdapter(this.store, () => this.publish());
+    this.runtimeAdapter = createRuntimeAdapter({
+      dataDir: this.store.getDataDir(),
+      log: (level, message) => this.log(level, message)
+    });
     this.sessionEngine = new SessionEngine({
       store: this.store,
       channelAdapter: this.channelAdapter,
+      runtimeAdapter: this.runtimeAdapter,
       onChanged: () => this.publish(),
       log: (level, message) => this.log(level, message)
     });
@@ -68,6 +81,12 @@ export class AppService extends EventEmitter {
         channelBackendKind: data.settings.channel.kind,
         channelBaseUrl: data.settings.channel.baseUrl,
         channelHeadersJson: serializeHeaders(data.settings.channel.requestHeaders),
+        assistantRuntimeKind: data.settings.assistantRuntime.kind,
+        openclawCommand: data.settings.assistantRuntime.openclawCommand,
+        openclawAgentId: data.settings.assistantRuntime.openclawAgentId,
+        openclawAcpHarnessId: data.settings.assistantRuntime.openclawAcpHarnessId,
+        openclawTimeoutSeconds: data.settings.assistantRuntime.openclawTimeoutSeconds,
+        openclawWorkingDir: data.settings.assistantRuntime.openclawWorkingDir,
         providerKind: data.settings.provider.kind,
         assistantPreset: data.settings.provider.assistantPreset,
         providerBaseUrl: data.settings.provider.baseUrl,
@@ -79,6 +98,7 @@ export class AppService extends EventEmitter {
         codexSandbox: data.settings.provider.codexSandbox
       },
       channelOptions: this.channelOptions,
+      runtimeOptions: this.runtimeOptions,
       providerOptions: this.providerOptions,
       runtime: data.runtime,
       wechat: {
@@ -134,6 +154,8 @@ export class AppService extends EventEmitter {
       return;
     }
 
+    await this.runtimeAdapter.prepare(data.settings);
+
     this.store.update((draft) => {
       draft.runtime.isRunning = true;
       draft.runtime.lastStartedAt = new Date().toISOString();
@@ -177,6 +199,7 @@ export class AppService extends EventEmitter {
 
   shutdown(): void {
     this.channelAdapter.stopMonitoring();
+    this.runtimeAdapter.shutdown?.();
     this.store.update((draft) => {
       if (draft.runtime.isRunning) {
         draft.runtime.isRunning = false;
@@ -185,18 +208,37 @@ export class AppService extends EventEmitter {
     });
   }
 
-  saveSettings(input: SaveSettingsInput): void {
+  async saveSettings(input: SaveSettingsInput): Promise<void> {
     const currentData = this.store.getData();
     const parsedHeaders = parseHeadersJson(input.channelHeadersJson);
     const channelDefinition = getChannelBackendDefinition(input.channelBackendKind);
+    const runtimeDefinition = getAssistantRuntimeDefinition(input.assistantRuntimeKind);
     const nextChannelBaseUrl = input.channelBaseUrl.trim() || channelDefinition.defaultBaseUrl;
+    const nextOpenClawCommand = input.openclawCommand.trim() || "openclaw";
+    const nextOpenClawAgentId = input.openclawAgentId.trim();
+    const nextOpenClawAcpHarnessId = input.openclawAcpHarnessId.trim() || "codex";
+    const nextOpenClawTimeoutSeconds = parseOpenClawTimeout(input.openclawTimeoutSeconds);
+    const nextOpenClawWorkingDir = input.openclawWorkingDir.trim();
     const channelChanged =
       currentData.settings.channel.kind !== input.channelBackendKind
       || currentData.settings.channel.baseUrl !== nextChannelBaseUrl
       || !areHeadersEqual(currentData.settings.channel.requestHeaders, parsedHeaders);
+    const assistantRuntimeChanged =
+      currentData.settings.assistantRuntime.kind !== input.assistantRuntimeKind
+      || currentData.settings.assistantRuntime.openclawCommand !== nextOpenClawCommand
+      || currentData.settings.assistantRuntime.openclawAgentId !== nextOpenClawAgentId
+      || currentData.settings.assistantRuntime.openclawAcpHarnessId !== nextOpenClawAcpHarnessId
+      || currentData.settings.assistantRuntime.openclawTimeoutSeconds !== nextOpenClawTimeoutSeconds
+      || currentData.settings.assistantRuntime.openclawWorkingDir !== nextOpenClawWorkingDir;
     const runtimeWasRunning = currentData.runtime.isRunning;
+    const shouldAutoRestartOpenClaw =
+      !channelChanged
+      && assistantRuntimeChanged
+      && (input.assistantRuntimeKind === "openclaw-cli" || input.assistantRuntimeKind === "openclaw-acp")
+      && currentData.wechat.status === "logged_in"
+      && Boolean(currentData.wechat.credentials);
 
-    if (channelChanged && runtimeWasRunning) {
+    if ((channelChanged || assistantRuntimeChanged) && runtimeWasRunning) {
       this.stopRuntime();
     }
 
@@ -211,6 +253,12 @@ export class AppService extends EventEmitter {
       draft.settings.channel.kind = input.channelBackendKind;
       draft.settings.channel.baseUrl = nextChannelBaseUrl;
       draft.settings.channel.requestHeaders = parsedHeaders;
+      draft.settings.assistantRuntime.kind = input.assistantRuntimeKind;
+      draft.settings.assistantRuntime.openclawCommand = nextOpenClawCommand;
+      draft.settings.assistantRuntime.openclawAgentId = nextOpenClawAgentId;
+      draft.settings.assistantRuntime.openclawAcpHarnessId = nextOpenClawAcpHarnessId;
+      draft.settings.assistantRuntime.openclawTimeoutSeconds = nextOpenClawTimeoutSeconds;
+      draft.settings.assistantRuntime.openclawWorkingDir = nextOpenClawWorkingDir;
       draft.settings.provider.kind = input.providerKind;
       draft.settings.provider.assistantPreset = input.assistantPreset;
       draft.settings.provider.apiStyle = resolveProviderApiStyle(
@@ -233,8 +281,9 @@ export class AppService extends EventEmitter {
       draft.settings.provider.codexModel = input.codexModel.trim();
       draft.settings.provider.codexSandbox = input.codexSandbox;
 
-      if (input.resetHistories || providerChanged) {
+      if (input.resetHistories || providerChanged || assistantRuntimeChanged) {
         for (const contact of Object.values(draft.contacts)) {
+          contact.runtimeSessionNonce += 1;
           contact.history = [];
           contact.lastMessagePreview = "";
           contact.lastReplyPreview = "";
@@ -252,12 +301,27 @@ export class AppService extends EventEmitter {
 
     const message = [
       "设置已保存",
-      input.resetHistories ? "并清空了历史上下文" : "",
+      input.resetHistories || assistantRuntimeChanged ? "并清空了历史上下文" : "",
+      assistantRuntimeChanged ? `${runtimeDefinition.label} 已更新` : "",
+      shouldAutoRestartOpenClaw ? "正在自动恢复接收消息" : "",
       channelChanged ? "微信后端已更新，请重新扫码登录" : ""
     ]
       .filter(Boolean)
       .join("，");
-    this.log(channelChanged ? "warn" : "info", message);
+    this.log(channelChanged || assistantRuntimeChanged ? "warn" : "info", message);
+
+    if (!shouldAutoRestartOpenClaw) {
+      return;
+    }
+
+    try {
+      await this.startRuntime();
+      this.log("info", "已自动切换到 OpenClaw 并恢复接收消息");
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.log("error", `设置已保存，但自动启动 OpenClaw 失败：${reason}`);
+      throw new Error(`设置已保存，但自动启动 OpenClaw 失败：${reason}`);
+    }
   }
 
   setContactEnabled(contactId: string, enabled: boolean): void {
@@ -280,6 +344,7 @@ export class AppService extends EventEmitter {
       if (!contact) {
         return;
       }
+      contact.runtimeSessionNonce += 1;
       contact.history = [];
       contact.lastMessagePreview = "";
       contact.lastReplyPreview = "";
@@ -354,6 +419,14 @@ function parseHeadersJson(input: string): Record<string, string> {
       return [key, value];
     })
   );
+}
+
+function parseOpenClawTimeout(input: number): number {
+  const numeric = Number(input);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    throw new Error("OpenClaw 超时时间必须是大于等于 0 的整数秒");
+  }
+  return Math.floor(numeric);
 }
 
 function areHeadersEqual(
